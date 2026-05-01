@@ -32,6 +32,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import com.julylove.medical.camera.Camera2Controller
 import com.julylove.medical.signal.FingerDetectionEngine
 import com.julylove.medical.signal.RhythmAnalysisEngine
+import com.julylove.medical.signal.SignalQualityIndexEngine
 import com.julylove.medical.ui.theme.*
 import com.julylove.medical.viewmodel.MonitorViewModel
 
