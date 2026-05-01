@@ -8,13 +8,14 @@ import android.hardware.SensorManager
 import kotlin.math.sqrt
 
 /**
- * Acelerómetro + giroscopio: rechazo de artefactos por movimiento relativo del dedo-lente.
- * Coherente con literatura sobre gating de segmentos contaminados en PPG móvil (p. ej. trabajos post-2020 en DL + IMU).
+ * Acelerómetro + giroscopio — [SensorManager] nunca se fuerza con cast inseguro.
  */
 class MotionArtifactDetector(context: Context) : SensorEventListener {
-    private val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
-    private val accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
-    private val gyroscope = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
+
+    private val sensorManager =
+        context.getSystemService(Context.SENSOR_SERVICE) as? SensorManager
+    private val accelerometer = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+    private val gyroscope = sensorManager?.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
 
     private var lastAcceleration = 0f
     private var currentAcceleration = 0f
@@ -30,16 +31,13 @@ class MotionArtifactDetector(context: Context) : SensorEventListener {
         private set
 
     fun start() {
-        accelerometer?.let {
-            sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_UI)
-        }
-        gyroscope?.let {
-            sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_UI)
-        }
+        val mgr = sensorManager ?: return
+        accelerometer?.let { mgr.registerListener(this, it, SensorManager.SENSOR_DELAY_UI) }
+        gyroscope?.let { mgr.registerListener(this, it, SensorManager.SENSOR_DELAY_UI) }
     }
 
     fun stop() {
-        sensorManager.unregisterListener(this)
+        sensorManager?.unregisterListener(this)
     }
 
     override fun onSensorChanged(event: SensorEvent?) {
