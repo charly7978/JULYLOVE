@@ -1,8 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="com.julylove.medical.signal.RhythmAnalysisEngineTest" tests="2" skipped="0" failures="0" errors="0" timestamp="2026-05-01T20:55:34.761Z" hostname="DESKTOP-RM68DPP" time="0.076">
-  <properties/>
-  <testcase name="intervalos regulares establecen ritmo REGULAR con BPM plausible" classname="com.julylove.medical.signal.RhythmAnalysisEngineTest" time="0.048"/>
-  <testcase name="patron muy irregular aumenta dispersion y activa clase de irregularidad alta" classname="com.julylove.medical.signal.RhythmAnalysisEngineTest" time="0.027"/>
-  <system-out><![CDATA[]]></system-out>
-  <system-err><![CDATA[]]></system-err>
-</testsuite>
