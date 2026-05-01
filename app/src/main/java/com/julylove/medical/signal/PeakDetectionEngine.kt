@@ -3,46 +3,54 @@ package com.julylove.medical.signal
 import java.util.*
 
 /**
- * Real-time Peak Detection using an adaptive threshold and refractory period.
+ * Advanced real-time Peak Detection for PPG.
+ * Uses a combination of adaptive thresholding, slope analysis, and 
+ * physiological refractory validation.
  */
 class PeakDetectionEngine(private val sampleRate: Float) {
     private var lastPeakTimestamp: Long = 0
-    private val refractoryPeriodMs = 300L // Min time between beats (200 BPM max)
+    private val minRefractoryMs = 350L // ~170 BPM max
     
-    private var localMax = -Float.MAX_VALUE
-    private var localMin = Float.MAX_VALUE
-    private var threshold = 0f
-    
-    // Window for threshold adaptation
-    private val windowSize = (sampleRate * 2).toInt() // 2 seconds window
     private val signalWindow: Queue<Float> = LinkedList()
+    private val windowSize = (sampleRate * 1.5).toInt()
+    
+    private var lastValue = 0f
+    private var isRising = false
+    private var possiblePeakValue = -Float.MAX_VALUE
+    private var possiblePeakTimestamp = 0L
 
     fun process(value: Float, timestamp: Long): Boolean {
         signalWindow.add(value)
-        if (signalWindow.size > windowSize) {
-            signalWindow.poll()
-        }
+        if (signalWindow.size > windowSize) signalWindow.poll()
+        if (signalWindow.size < 10) return false
 
-        // Update threshold based on window max/min
-        val maxInWindow = signalWindow.maxOrNull() ?: value
-        val minInWindow = signalWindow.minOrNull() ?: value
-        threshold = minInWindow + (maxInWindow - minInWindow) * 0.6f
+        val maxInWindow = signalWindow.maxOrNull() ?: 1f
+        val minInWindow = signalWindow.minOrNull() ?: 0f
+        val threshold = minInWindow + (maxInWindow - minInWindow) * 0.7f
 
-        var isPeak = false
+        val slope = value - lastValue
+        val wasRising = isRising
+        isRising = slope > 0
         
-        // Basic peak detection logic
-        if (value > threshold && (timestamp - lastPeakTimestamp) > refractoryPeriodMs) {
-            // Check if we are at a local maximum
-            if (value > localMax) {
-                localMax = value
-            } else if (value < localMax * 0.95f) {
-                // We passed the peak
-                isPeak = true
+        var peakDetected = false
+
+        // Detect local maximum (transition from rising to falling)
+        if (wasRising && !isRising && value > threshold) {
+            val timeSinceLast = timestamp - lastPeakTimestamp
+            
+            // Validate physiological interval
+            if (timeSinceLast > minRefractoryMs) {
+                peakDetected = true
                 lastPeakTimestamp = timestamp
-                localMax = -Float.MAX_VALUE
             }
         }
-        
-        return isPeak
+
+        lastValue = value
+        return peakDetected
+    }
+    
+    fun reset() {
+        signalWindow.clear()
+        lastPeakTimestamp = 0
     }
 }

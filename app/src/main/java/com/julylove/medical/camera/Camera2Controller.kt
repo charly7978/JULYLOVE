@@ -108,22 +108,64 @@ class Camera2Controller(private val context: Context) {
     }
 
     private fun processImage(image: android.media.Image) {
-        val yBuffer = image.planes[0].buffer
-        val uBuffer = image.planes[1].buffer
-        val vBuffer = image.planes[2].buffer
+        val yPlane = image.planes[0]
+        val uPlane = image.planes[1]
+        val vPlane = image.planes[2]
 
-        // Simple average of Y, U, V components as proxies for RGB for speed
-        // In a production app, a full YUV to RGB conversion of a central ROI is preferred.
-        var ySum = 0L
-        val ySize = yBuffer.remaining()
-        for (i in 0 until ySize step 4) {
-            ySum += yBuffer.get(i).toInt() and 0xFF
+        val yBuffer = yPlane.buffer
+        val uBuffer = uPlane.buffer
+        val vBuffer = vPlane.buffer
+
+        val width = image.width
+        val height = image.height
+        
+        // Define ROI: Central 25% of the frame
+        val roiWidth = width / 2
+        val roiHeight = height / 2
+        val startX = width / 4
+        val startY = height / 4
+
+        var rSum = 0L
+        var gSum = 0L
+        var bSum = 0L
+        var count = 0
+
+        val yRowStride = yPlane.rowStride
+        val uvRowStride = uPlane.rowStride
+        val uvPixelStride = uPlane.pixelStride
+
+        for (y in startY until startY + roiHeight step 2) {
+            for (x in startX until startX + roiWidth step 2) {
+                val yIndex = y * yRowStride + x
+                val uvIndex = (y / 2) * uvRowStride + (x / 2) * uvPixelStride
+
+                val yp = yBuffer.get(yIndex).toInt() and 0xFF
+                val up = uBuffer.get(uvIndex).toInt() and 0xFF
+                val vp = vBuffer.get(uvIndex).toInt() and 0xFF
+
+                // YUV to RGB conversion (simplified but accurate for PPG)
+                // R = Y + 1.402 * (V - 128)
+                // G = Y - 0.344136 * (U - 128) - 0.714136 * (V - 128)
+                // B = Y + 1.772 * (U - 128)
+                
+                val r = (yp + 1.402f * (vp - 128)).coerceIn(0f, 255f).toInt()
+                val g = (yp - 0.344136f * (up - 128) - 0.714136f * (vp - 128)).coerceIn(0f, 255f).toInt()
+                val b = (yp + 1.772f * (up - 128)).coerceIn(0f, 255f).toInt()
+
+                rSum += r
+                gSum += g
+                bSum += b
+                count++
+            }
         }
-        
-        val avgY = ySum.toFloat() / (ySize / 4)
-        
-        // For PPG, the Red channel (often dominant in Y) is most important when using Flash
-        // We'll pass the Y value as a proxy for the pulsatile signal.
-        listener?.onFrame(avgY, avgY, avgY, System.currentTimeMillis())
+
+        if (count > 0) {
+            listener?.onFrame(
+                rSum.toFloat() / count,
+                gSum.toFloat() / count,
+                bSum.toFloat() / count,
+                System.currentTimeMillis()
+            )
+        }
     }
 }
