@@ -8,6 +8,7 @@ import com.julylove.medical.signal.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import java.util.*
 import java.util.concurrent.TimeUnit
 
 class MonitorViewModel(
@@ -132,6 +133,13 @@ class MonitorViewModel(
             peakDetector.process(filtered, timestamp)
         } else false
 
+        // Local variables to hold calculated clinical metrics for this frame
+        var currentBpm = _uiState.value.bpm
+        var currentRhythm = _uiState.value.rhythmStatus
+        var currentRmssd = _uiState.value.technicalData.rmssd
+        var currentPnn50 = _uiState.value.technicalData.pnn50
+        var currentCv = _uiState.value.technicalData.cv
+
         if (isPeak) {
             if (lastPeakTime != 0L) {
                 val ppi = timestamp - lastPeakTime
@@ -139,28 +147,21 @@ class MonitorViewModel(
                     ppiHistory.add(ppi)
                     if (ppiHistory.size > 60) ppiHistory.removeAt(0)
                     
-                val (bpm, rhythm, rmssd, pnn50, cv) = rhythmEngine.addIntervalDetailed(ppi)
-                
-                viewModelScope.launch {
-                    _uiState.value = _uiState.value.copy(
-                        bpm = bpm,
-                        rhythmStatus = rhythm,
-                        technicalData = _uiState.value.technicalData.copy(
-                            rmssd = rmssd,
-                            pnn50 = pnn50,
-                            cv = cv
-                        )
-                    )
+                    val detailed = rhythmEngine.addIntervalDetailed(ppi)
+                    currentBpm = detailed.bpm
+                    currentRhythm = detailed.status
+                    currentRmssd = detailed.rmssd
+                    currentPnn50 = detailed.pnn50
+                    currentCv = detailed.cv
                 }
             }
+            lastPeakTime = timestamp
         }
-        lastPeakTime = timestamp
-    }
 
         // SpO2 Estimation
         val spo2Result = spo2Estimator.process(red, green, blue, sqiScore)
 
-        // Update Waveform Buffer for UI
+        // Update Waveform Buffer
         val sample = PPGSample(
             timestamp = timestamp,
             redMean = red,
@@ -175,38 +176,37 @@ class MonitorViewModel(
         if (ppgBuffer.size > maxBufferSize) ppgBuffer.removeAt(0)
 
         // FPS Calculation
+        var currentFps = _uiState.value.technicalData.fps
         frameCount++
         val now = System.currentTimeMillis()
         if (now - lastFpsTimestamp >= 1000) {
-            val fps = frameCount
+            currentFps = frameCount
             frameCount = 0
             lastFpsTimestamp = now
-            butterworth.updateCoefficients(fps.toFloat())
-            viewModelScope.launch {
-                _uiState.value = _uiState.value.copy(
-                    technicalData = _uiState.value.technicalData.copy(fps = fps)
-                )
-            }
+            butterworth.updateCoefficients(currentFps.toFloat())
         }
 
-        // Update UI State
-        viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(
-                fingerState = fingerState,
-                sqiLevel = sqiLevel,
-                spo2 = spo2Result.spo2,
-                spo2Status = spo2Result.status,
-                ppgSamples = ppgBuffer.toList(),
-                isMoving = isMoving,
-                technicalData = _uiState.value.technicalData.copy(
-                    signalConfidence = sqiScore,
-                    rmssd = rhythmEngine.getRMSSD(),
-                    redDC = red,
-                    greenDC = green,
-                    motionIntensity = motionDetector.motionIntensity
-                )
+        // Atomic UI State Update (No coroutine launch needed for simple value assignment)
+        _uiState.value = _uiState.value.copy(
+            bpm = currentBpm,
+            spo2 = spo2Result.spo2,
+            spo2Status = spo2Result.status,
+            fingerState = fingerState,
+            rhythmStatus = currentRhythm,
+            sqiLevel = sqiLevel,
+            ppgSamples = ppgBuffer.toList(), // Defensive copy for Compose
+            isMoving = isMoving,
+            technicalData = TechnicalData(
+                fps = currentFps,
+                rmssd = currentRmssd,
+                pnn50 = currentPnn50,
+                cv = currentCv,
+                signalConfidence = sqiScore,
+                redDC = red,
+                greenDC = green,
+                motionIntensity = motionDetector.motionIntensity
             )
-        }
+        )
     }
 
     override fun onCleared() {
