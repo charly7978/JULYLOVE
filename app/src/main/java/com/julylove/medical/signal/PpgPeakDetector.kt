@@ -4,12 +4,28 @@ package com.julylove.medical.signal
  * PpgPeakDetector: Real-time peak detection with physiological constraints.
  * Detects systolic peaks in the filtered PPG signal.
  */
-class PpgPeakDetector(private val sampleRate: Float) {
+class PpgPeakDetector(initialSampleRate: Float) {
+    private var sampleRate: Float = initialSampleRate.coerceIn(12f, 120f)
     private var lastPeakTimestampNs: Long = 0
     private val minRefractoryNs = 350_000_000L // ~170 BPM max
-    
-    private val windowSize = (sampleRate * 1.5).toInt()
+
+    private var windowSize = computeWindowSize(sampleRate)
     private val signalWindow = mutableListOf<Float>()
+
+    private fun computeWindowSize(sr: Float): Int =
+        (sr.coerceIn(12f, 120f) * 1.5f).toInt().coerceIn(15, 180)
+
+    /** Alinea ventana/refractario con FPS real de cámara (evita umbral con tasa “inventada”). */
+    fun updateSampleRate(sr: Float) {
+        val next = sr.coerceIn(15f, 90f)
+        if (kotlin.math.abs(next - sampleRate) < 1.5f) return
+        sampleRate = next
+        windowSize = computeWindowSize(sampleRate)
+        signalWindow.clear()
+        lastPeakTimestampNs = 0
+        lastValue = 0f
+        isRising = false
+    }
     
     private var lastValue = 0f
     private var isRising = false
@@ -22,8 +38,8 @@ class PpgPeakDetector(private val sampleRate: Float) {
     )
 
     fun process(value: Float, timestampNs: Long): BeatEvent? {
+        while (signalWindow.size > windowSize) signalWindow.removeAt(0)
         signalWindow.add(value)
-        if (signalWindow.size > windowSize) signalWindow.removeAt(0)
         if (signalWindow.size < 10) return null
 
         val maxInWindow = signalWindow.maxOrNull() ?: 1f
@@ -62,5 +78,7 @@ class PpgPeakDetector(private val sampleRate: Float) {
     fun reset() {
         signalWindow.clear()
         lastPeakTimestampNs = 0
+        lastValue = 0f
+        isRising = false
     }
 }

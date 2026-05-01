@@ -17,6 +17,7 @@ class Spo2Estimator {
     )
 
     companion object {
+        /** Perfil sin calibración por dispositivo / cohorte: no se expone % en UI (evita “medición” ficticia). */
         val DEFAULT_PROFILE = CalibrationProfile("Generic", 110.0, 25.0)
     }
 
@@ -37,6 +38,9 @@ class Spo2Estimator {
         red: Float, green: Float, blue: Float,
         sqi: Float
     ): Spo2Result {
+        if (activeProfile.name == DEFAULT_PROFILE.name) {
+            return Spo2Result(0f, 0.0, "SpO₂: requiere calibración por dispositivo (RoR no mostrado)")
+        }
         redBuffer.add(red)
         greenBuffer.add(green)
         if (redBuffer.size > windowSize) {
@@ -82,7 +86,6 @@ class Spo2Estimator {
     }
 
     fun setProfileForDevice(model: String) {
-        // Device specific calibration can be added here
         activeProfile = DEFAULT_PROFILE
     }
 

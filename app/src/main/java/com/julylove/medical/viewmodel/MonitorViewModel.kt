@@ -74,7 +74,7 @@ class MonitorViewModel(
     private val detrender = DetrendingFilter(14)
     private val butterworth = ButterworthBandpass(60f)
     private val smoother = SavitzkyGolayFilter()
-    private val peakDetector = PeakDetectionEngine(60f)
+    private val peakDetector = PpgPeakDetector(30f)
     private val rhythmEngine = RhythmAnalysisEngine()
     private val spo2Estimator = Spo2Estimator()
     private val motionDetector = MotionArtifactDetector(context)
@@ -223,7 +223,8 @@ class MonitorViewModel(
 
         // 3. Peak Detection & Feedback (ONLY IF VALID)
         val isPeak = if (validityState == PpgValidityState.PPG_VALID) {
-            val detected = peakDetector.process(filtered, timestamp)
+            val beat = peakDetector.process(filtered, timestamp)
+            val detected = beat != null
             if (detected) {
                 feedbackController.trigger()
             }
@@ -313,7 +314,9 @@ class MonitorViewModel(
             currentFps = frameCount
             frameCount = 0
             lastFpsTimestamp = now
-            butterworth.updateCoefficients(currentFps.toFloat())
+            val fs = currentFps.toFloat().coerceAtLeast(12f).coerceAtMost(120f)
+            butterworth.updateCoefficients(fs)
+            peakDetector.updateSampleRate(fs)
         }
 
         // 7. Atomic State Update

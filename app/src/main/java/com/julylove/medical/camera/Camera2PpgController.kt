@@ -81,12 +81,26 @@ class Camera2PpgController(private val context: Context) {
         }
     }
 
+    /** Sólo cámara **trasera**; si hay varias (wide/macro principal), prefijar la que reporta linterna PPG. */
+    private fun chooseRearPpgCameraId(): String? {
+        val backIds = cameraManager.cameraIdList.filter { cameraId ->
+            val ch = cameraManager.getCameraCharacteristics(cameraId)
+            ch.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK
+        }
+        if (backIds.isEmpty()) return null
+        val withTorch = backIds.firstOrNull { cameraId ->
+            cameraManager.getCameraCharacteristics(cameraId)
+                .get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
+        }
+        return withTorch ?: backIds.first()
+    }
+
     @SuppressLint("MissingPermission")
     private fun openCamera() {
-        val cameraId = cameraManager.cameraIdList.firstOrNull { id ->
-            val characteristics = cameraManager.getCameraCharacteristics(id)
-            characteristics.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK
-        } ?: return
+        val cameraId = chooseRearPpgCameraId() ?: run {
+            Log.e("Camera2Ppg", "No hay cámara trasera disponible.")
+            return
+        }
 
         activeCameraId = cameraId
 
