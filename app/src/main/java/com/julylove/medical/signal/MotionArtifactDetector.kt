@@ -66,7 +66,8 @@ class MotionArtifactDetector(context: Context) : SensorEventListener {
 
         val combined = accelerationTotal + gyroDeltaEma * 2.5f
         motionIntensity = combined
-        isMoving = combined > 0.55f
+        // Umbral alto: pulsación/manual del usuario no debe tachar MEDICIÓN por micro‑movimiento
+        isMoving = combined > 0.78f
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
