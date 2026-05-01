@@ -192,13 +192,13 @@ class PeakDetectorDerivative(initialSampleRate: Float) {
         return DerivativePeak(
             timestampNs = timestampNs,
             rrMs = rrMs,
-            confidence = confidence,
+            confidence = confidence.toDouble(),
             amplitude = signalBuffer[currentIndex].toDouble(),
             prominence = peakCharacteristics.prominence.toDouble(),
             peakWidth = peakCharacteristics.width,
             slopeRatio = slopeRatio,
             concavity = concavity,
-            reason = generateReasonString(confidence, peakCharacteristics, slopeRatio)
+            reason = generateReasonString(confidence.toDouble(), peakCharacteristics, slopeRatio)
         )
     }
     
@@ -264,7 +264,7 @@ class PeakDetectorDerivative(initialSampleRate: Float) {
         val concavity = secondDerivative[derivIndex]
         
         // Normalizar concavidad (valores más negativos = mejor)
-        return (abs(concavity) / (localStd + 1e-6f)).coerceIn(0.0, 2.0)
+        return (abs(concavity) / (localStd + 1e-6)).coerceIn(0.0, 2.0)
     }
     
     private fun calculateConfidence(
@@ -272,21 +272,21 @@ class PeakDetectorDerivative(initialSampleRate: Float) {
         slopeRatio: Double,
         concavity: Double,
         derivativeMagnitude: Float
-    ): Double {
+    ): Float {
         // Factores de confianza
-        val widthScore = when {
+        val widthScore: Double = when {
             characteristics.width in minPeakWidth..maxPeakWidth -> 1.0
             else -> 0.5
         }
         
-        val prominenceScore = (characteristics.prominence / prominenceThreshold).coerceIn(0.0, 1.0)
+        val prominenceScore = (characteristics.prominence / prominenceThreshold.toDouble()).coerceIn(0.0, 1.0)
         val slopeScore = (1.0 - abs(slopeRatio - 1.5) / 1.5).coerceIn(0.0, 1.0)
         val concavityScore = (concavity / 2.0).coerceIn(0.0, 1.0)
-        val derivativeScore = (derivativeMagnitude / (localStd + 1e-6f)).coerceIn(0.0, 1.0)
+        val derivativeScore = (derivativeMagnitude.toDouble() / (localStd.toDouble() + 1e-6)).coerceIn(0.0, 1.0)
         
         // Combinación ponderada
         return (widthScore * 0.2 + prominenceScore * 0.25 + slopeScore * 0.2 + 
-                concavityScore * 0.2 + derivativeScore * 0.15).coerceIn(0.0, 1.0)
+                concavityScore * 0.2 + derivativeScore * 0.15).coerceIn(0.0, 1.0).toFloat()
     }
     
     private fun generateReasonString(

@@ -388,7 +388,7 @@ class MotionSensorController(private val context: Context) : SensorEventListener
         val secondMean = secondHalf.map { it.magnitude }.average()
         
         val trend = abs(secondMean - firstMean) / firstMean.coerceAtLeast(1.0)
-        return (trend * 5f).coerceIn(0f, 1f)
+        return (trend * 5.0).coerceIn(0.0, 1.0).toFloat()
     }
     
     private fun clearBuffers() {

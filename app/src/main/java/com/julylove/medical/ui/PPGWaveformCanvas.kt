@@ -8,6 +8,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.dp
+import kotlin.math.abs
 import com.julylove.medical.signal.PPGSample
 import com.julylove.medical.signal.RhythmAnalysisEngine
 import com.julylove.medical.signal.BeatClassifier

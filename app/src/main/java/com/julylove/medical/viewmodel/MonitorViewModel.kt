@@ -268,6 +268,17 @@ class MonitorViewModel(
             )
         } else 0f
 
+        // 4. Clinical Metrics (ONLY IF VALID)
+        var currentBpm = _uiState.value.bpm
+        var currentRhythm = _uiState.value.rhythmStatus
+        var currentRmssd = _uiState.value.technicalData.rmssd
+        var currentPnn50 = _uiState.value.technicalData.pnn50
+        var currentCv = _uiState.value.technicalData.cv
+        var currentH = _uiState.value.technicalData.shannonEntropyBits
+        var currentSampEn = _uiState.value.technicalData.sampleEntropy
+        var currentSpo2 = _uiState.value.spo2
+        var currentSpo2Status = _uiState.value.spo2Status
+
         // 3. Advanced Peak Detection & Fusion
         var isPeak = false
         var fusedBeat: HeartRateFusion.FusedBeat? = null
@@ -303,17 +314,6 @@ class MonitorViewModel(
             derivativeDetector.reset()
             heartRateFusion.reset()
         }
-
-        // 4. Clinical Metrics (ONLY IF VALID)
-        var currentBpm = _uiState.value.bpm
-        var currentRhythm = _uiState.value.rhythmStatus
-        var currentRmssd = _uiState.value.technicalData.rmssd
-        var currentPnn50 = _uiState.value.technicalData.pnn50
-        var currentCv = _uiState.value.technicalData.cv
-        var currentH = _uiState.value.technicalData.shannonEntropyBits
-        var currentSampEn = _uiState.value.technicalData.sampleEntropy
-        var currentSpo2 = _uiState.value.spo2
-        var currentSpo2Status = _uiState.value.spo2Status
 
         if (validityState == PpgValidityState.PPG_VALID) {
             if (isPeak) {

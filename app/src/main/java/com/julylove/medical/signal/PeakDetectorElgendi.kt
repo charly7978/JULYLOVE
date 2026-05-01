@@ -168,7 +168,7 @@ class PeakDetectorElgendi(initialSampleRate: Float) {
             amplitude = currentValue.toDouble(),
             prominence = prominence.toDouble(),
             morphologyScore = morphologyScore.toDouble(),
-            reason = generateReasonString(confidence, morphologyScore)
+            reason = generateReasonString(confidence.toFloat(), morphologyScore.toFloat())
         )
     }
     
@@ -277,12 +277,12 @@ class PeakDetectorElgendi(initialSampleRate: Float) {
             .coerceIn(0.0, 1.0)
     }
     
-    private fun generateReasonString(confidence: Double, morphologyScore: Double): String {
+    private fun generateReasonString(confidence: Float, morphologyScore: Float): String {
         return when {
-            confidence > 0.8 && morphologyScore > 0.7 -> "Pico sistólico excelente"
-            confidence > 0.6 && morphologyScore > 0.5 -> "Pico sistólico bueno"
-            confidence > 0.4 -> "Pico sistólico aceptable"
-            morphologyScore < 0.3 -> "Morfología atípica"
+            confidence > 0.8f && morphologyScore > 0.7f -> "Pico sistólico excelente"
+            confidence > 0.6f && morphologyScore > 0.5f -> "Pico sistólico bueno"
+            confidence > 0.4f -> "Pico sistólico aceptable"
+            morphologyScore < 0.3f -> "Morfología atípica"
             else -> "Pico sistólico marginal"
         }
     }

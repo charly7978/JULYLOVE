@@ -146,8 +146,8 @@ class BeatClassifier {
         return when {
             rrMs < minNormalRR -> 0.2  // Demasiado rápido
             rrMs > maxNormalRR -> 0.2  // Demasiado lento
-            rrMs in 600L..1000L -> 1.0 // Rango normal (60-100 BPM)
-            rrMs in 500L..1200L -> 0.8 // Rango aceptable (50-120 BPM)
+            rrMs >= 600L && rrMs <= 1000L -> 1.0 // Rango normal (60-100 BPM)
+            rrMs >= 500L && rrMs <= 1200L -> 0.8 // Rango aceptable (50-120 BPM)
             else -> 0.5
         }
     }
@@ -155,7 +155,7 @@ class BeatClassifier {
     private fun calculateConsistencyScore(fusedBeat: HeartRateFusion.FusedBeat): Double {
         if (beatHistory.size < 3) return 0.5 // Sin historial suficiente
         
-        val recentBeats = beatHistory.takeLast(5)
+        val recentBeats: List<BeatClassifier.ClassifiedBeat> = beatHistory.takeLast(5)
         val rrMs = fusedBeat.rrMs ?: return 0.0
         
         // Calcular desviación respecto al promedio reciente

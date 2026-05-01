@@ -16,10 +16,10 @@ class ArrhythmiaScreening {
     private val minBeatsForScreening = 8  // Mínimo para screening válido
     
     // Umbrales clínicos (basados en literatura PPG)
-    private val irregularityThreshold = 0.25    // 25% CV para irregularidad significativa
-    private val prematureThreshold = 0.75      // 75% del RR promedio para prematuro
-    private val pauseThreshold = 1.4           // 140% del RR promedio para pausa
-    private val variabilityThreshold = 0.3      // 30% variabilidad para alerta
+    private var irregularityThreshold = 0.25    // 25% CV para irregularidad significativa
+    private var prematureThreshold = 0.75      // 75% del RR promedio para prematuro
+    private var pauseThreshold = 1.4           // 140% del RR promedio para pausa
+    private var variabilityThreshold = 0.3      // 30% variabilidad para alerta
     
     // Historial de latidos clasificados
     private val beatHistory = mutableListOf<BeatClassifier.ClassifiedBeat>()

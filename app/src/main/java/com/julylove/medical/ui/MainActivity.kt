@@ -284,7 +284,7 @@ fun FullScreenMonitor(viewModel: MonitorViewModel) {
                     OutlinedButton(
                         onClick = { viewModel.toggleCalibrationScreen(true) },
                         modifier = Modifier.fillMaxWidth(),
-                        shape = androidx.compose.foundation.shape.RectangleShape,
+                        shape = androidx.compose.ui.graphics.RectangleShape,
                         border = androidx.compose.foundation.BorderStroke(1.dp, MedicalCyan)
                     ) {
                         Text(

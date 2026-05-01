@@ -145,11 +145,17 @@ class HeartRateFusion {
         timestampNs: Long
     ): FusedBeat? {
         
-        val peak = elgendi ?: derivative!!
+        val peak = elgendi ?: derivative ?: return null
         val isElgendi = elgendi != null
         
         // Requerir alta confianza para detección individual
-        if (peak.confidence < 0.65) {
+        val confidence = when (peak) {
+            is PeakDetectorElgendi.ElgendiPeak -> peak.confidence
+            is PeakDetectorDerivative.DerivativePeak -> peak.confidence
+            else -> 0.0
+        }
+        
+        if (confidence < 0.65) {
             totalRejections++
             return null
         }
@@ -161,13 +167,21 @@ class HeartRateFusion {
         }
         
         // Validar con historial RR
-        val rrConsistent = validateRRConsistency(peak.rrMs)
+        val rrConsistent = when (peak) {
+            is PeakDetectorElgendi.ElgendiPeak -> peak.rrMs?.let { validateRRConsistency(it) } ?: false
+            is PeakDetectorDerivative.DerivativePeak -> peak.rrMs?.let { validateRRConsistency(it) } ?: false
+            else -> false
+        }
         
         // Validación morfológica adicional
         val morphologyValid = if (isElgendi) {
-            elgendi.morphologyScore > 0.5 && elgendi.prominence > 0.08
+            elgendi?.let { e ->
+                e.morphologyScore > 0.5 && e.prominence > 0.08
+            } ?: false
         } else {
-            derivative.peakWidth in 3..15 && derivative.slopeRatio in 0.8..2.2
+            derivative?.let { d ->
+                d.peakWidth in 3..15 && d.slopeRatio in 0.8..2.2
+            } ?: false
         }
         
         if (!morphologyValid) {
@@ -176,20 +190,22 @@ class HeartRateFusion {
         }
         
         // Calcular BPM instantáneo
-        val bpmInstant = if (peak.rrMs != null && peak.rrMs > 0) {
-            60000.0 / peak.rrMs
-        } else null
+        val bpmInstant = when (peak) {
+            is PeakDetectorElgendi.ElgendiPeak -> peak.rrMs?.let { if (it > 0) 60000.0 / it else null }
+            is PeakDetectorDerivative.DerivativePeak -> peak.rrMs?.let { if (it > 0) 60000.0 / it else null }
+            else -> null
+        }
         
         // Generar flags de calidad
         val qualityFlags = mutableSetOf<QualityFlag>()
-        if (peak.confidence > 0.75) qualityFlags.add(QualityFlag.HIGH_CONFIDENCE)
+        if (confidence > 0.75) qualityFlags.add(QualityFlag.HIGH_CONFIDENCE)
         if (rrConsistent) qualityFlags.add(QualityFlag.CONSISTENT_RR)
         if (sqi > 0.7) qualityFlags.add(QualityFlag.LOW_NOISE)
         
         // Determinar método de detección
         val detectionMethod = when {
-            isElgendi && peak.confidence > 0.8 -> DetectionMethod.ELGENDI_HIGH_CONF
-            !isElgendi && peak.confidence > 0.8 -> DetectionMethod.DERIVATIVE_HIGH_CONF
+            isElgendi && confidence > 0.8 -> DetectionMethod.ELGENDI_HIGH_CONF
+            !isElgendi && confidence > 0.8 -> DetectionMethod.DERIVATIVE_HIGH_CONF
             rrConsistent -> DetectionMethod.SINGLE_VALIDATED
             else -> {
                 totalRejections++
@@ -198,16 +214,31 @@ class HeartRateFusion {
         }
         
         // Actualizar historial RR
-        peak.rrMs?.let { updateRRHistory(it.toLong()) }
+        when (peak) {
+            is PeakDetectorElgendi.ElgendiPeak -> peak.rrMs?.let { updateRRHistory(it.toLong()) }
+            is PeakDetectorDerivative.DerivativePeak -> peak.rrMs?.let { updateRRHistory(it.toLong()) }
+        }
         
         totalFusedDetections++
         
         return FusedBeat(
-            timestampNs = peak.timestampNs,
-            rrMs = peak.rrMs,
+            timestampNs = when (peak) {
+                is PeakDetectorElgendi.ElgendiPeak -> peak.timestampNs
+                is PeakDetectorDerivative.DerivativePeak -> peak.timestampNs
+                else -> timestampNs
+            },
+            rrMs = when (peak) {
+                is PeakDetectorElgendi.ElgendiPeak -> peak.rrMs
+                is PeakDetectorDerivative.DerivativePeak -> peak.rrMs
+                else -> null
+            },
             bpmInstant = bpmInstant,
-            confidence = peak.confidence,
-            amplitude = peak.amplitude,
+            confidence = confidence,
+            amplitude = when (peak) {
+                is PeakDetectorElgendi.ElgendiPeak -> peak.amplitude
+                is PeakDetectorDerivative.DerivativePeak -> peak.amplitude
+                else -> 0.0
+            },
             detectionMethod = detectionMethod,
             elgendiData = elgendi,
             derivativeData = derivative,

@@ -372,7 +372,7 @@ data class DeviceCalibrationProfile(
      * Verifica si el perfil es aplicable para un valor SpO2
      */
     fun isApplicableFor(spo2: Int): Boolean {
-        return spo2 in validRange
+        return spo2 >= validRange.first && spo2 <= validRange.second
     }
     
     /**
