@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.julylove.medical.camera.Camera2PpgController
 import com.julylove.medical.camera.PpgCameraFrame
 import com.julylove.medical.signal.*
+import com.julylove.medical.sensors.MotionSensorController
 import com.julylove.medical.data.*
 import com.julylove.medical.haptics.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -25,13 +26,16 @@ class MonitorViewModel(
         val validityState: PpgValidityState = PpgValidityState.MEASURING_RAW_OPTICAL,
         val rhythmStatus: RhythmAnalysisEngine.RhythmStatus = RhythmAnalysisEngine.RhythmStatus.CALIBRATING,
         val ppgSamples: List<PPGSample> = emptyList(),
+        val classifiedBeats: List<BeatClassifier.ClassifiedBeat> = emptyList(),
+        val arrhythmiaEvents: List<ArrhythmiaScreening.ArrhythmiaEvent> = emptyList(),
         val isMeasuring: Boolean = false,
         val technicalData: TechnicalData = TechnicalData(),
         val beepEnabled: Boolean = true,
         val vibrationEnabled: Boolean = true,
         /** Adquisición de mediana línea‑negra (mantener dedo alejado o tapón opaco durante el contaje). */
         val darkCalibrationCollecting: Boolean = false,
-        val darkCalibrationReady: Boolean = false
+        val darkCalibrationReady: Boolean = false,
+        val showCalibrationScreen: Boolean = false
     )
 
     data class TechnicalData(
@@ -74,10 +78,22 @@ class MonitorViewModel(
     private val detrender = DetrendingFilter(14)
     private val butterworth = ButterworthBandpass(60f)
     private val smoother = SavitzkyGolayFilter()
+    
+    // Advanced Detection Pipeline
+    private val elgendiDetector = PeakDetectorElgendi(60f)
+    private val derivativeDetector = PeakDetectorDerivative(60f)
+    private val heartRateFusion = HeartRateFusion()
+    private val beatClassifier = BeatClassifier()
+    private val arrhythmiaScreening = ArrhythmiaScreening()
+    
+    // Legacy components (maintained for compatibility)
     private val peakDetector = PpgPeakDetector(30f)
     private val rhythmEngine = RhythmAnalysisEngine()
     private val spo2Estimator = Spo2Estimator()
     private val motionDetector = MotionArtifactDetector(context)
+    
+    // New motion sensor controller
+    private val motionSensorController = MotionSensorController(context)
 
     private var lastPeakTime = 0L
     private var frameCount = 0
@@ -98,6 +114,19 @@ class MonitorViewModel(
     init {
         cameraController.listener = this
         spo2Estimator.setProfileForDevice(android.os.Build.MODEL)
+        
+        // Configurar motion sensor controller
+        motionSensorController.listener = object : MotionSensorController.MotionListener {
+            override fun onMotionUpdate(motionData: MotionSensorController.MotionData) {
+                // Actualizar estado de movimiento en tiempo real
+                val currentState = _uiState.value
+                _uiState.value = currentState.copy(
+                    technicalData = currentState.technicalData.copy(
+                        motionIntensity = motionData.motionIntensity
+                    )
+                )
+            }
+        }
     }
 
     fun toggleMeasurement() {
@@ -115,13 +144,21 @@ class MonitorViewModel(
         opticalRedWindow.clear()
         opticalGreenWindow.clear()
         opticalBlueWindow.clear()
+        
+        // Reset all detection components
         physiologyClassifier.reset()
+        elgendiDetector.reset()
+        derivativeDetector.reset()
+        heartRateFusion.reset()
+        beatClassifier.reset()
+        arrhythmiaScreening.reset()
         peakDetector.reset()
         rhythmEngine.reset()
         detrender.reset()
         butterworth.reset()
         smoother.reset()
         odGreenExtractor.reset()
+        
         darkOffsetLinearR = 0f
         darkOffsetLinearG = 0f
         darkOffsetLinearB = 0f
@@ -130,14 +167,24 @@ class MonitorViewModel(
         darkScratchR.clear()
         darkScratchG.clear()
         darkScratchB.clear()
+        
         cameraController.start()
         motionDetector.start()
-        _uiState.value = _uiState.value.copy(isMeasuring = true, bpm = 0, spo2 = 0f)
+        motionSensorController.start()
+        
+        _uiState.value = _uiState.value.copy(
+            isMeasuring = true, 
+            bpm = 0, 
+            spo2 = 0f,
+            classifiedBeats = emptyList(),
+            arrhythmiaEvents = emptyList()
+        )
     }
 
     private fun stopMeasurement() {
         cameraController.stop()
         motionDetector.stop()
+        motionSensorController.stop()
         
         // Save Session
         if (ppgBuffer.isNotEmpty()) {
@@ -221,17 +268,40 @@ class MonitorViewModel(
             )
         } else 0f
 
-        // 3. Peak Detection & Feedback (ONLY IF VALID)
-        val isPeak = if (validityState == PpgValidityState.PPG_VALID) {
-            val beat = peakDetector.process(filtered, timestamp)
-            val detected = beat != null
-            if (detected) {
+        // 3. Advanced Peak Detection & Fusion
+        var isPeak = false
+        var fusedBeat: HeartRateFusion.FusedBeat? = null
+        var classifiedBeat: BeatClassifier.ClassifiedBeat? = null
+        var arrhythmiaEvent: ArrhythmiaScreening.ArrhythmiaEvent? = null
+        
+        if (validityState == PpgValidityState.PPG_VALID) {
+            // Detectar picos con ambos métodos
+            val elgendiPeak = elgendiDetector.process(filtered, timestamp)
+            val derivativePeak = derivativeDetector.process(filtered, timestamp)
+            
+            // Fusionar detecciones
+            fusedBeat = heartRateFusion.fuseDetections(elgendiPeak, derivativePeak, sqiFrame, timestamp)
+            
+            if (fusedBeat != null) {
+                isPeak = true
                 feedbackController.trigger()
+                
+                // Clasificar latido
+                classifiedBeat = beatClassifier.classifyBeat(fusedBeat, sqiFrame)
+                
+                // Screening de arritmias
+                arrhythmiaEvent = arrhythmiaScreening.screenForArrhythmias(classifiedBeat)
+                
+                // Actualizar BPM con datos fusionados
+                fusedBeat.bpmInstant?.let { bpm ->
+                    currentBpm = bpm.toInt()
+                }
             }
-            detected
         } else {
-            peakDetector.reset()
-            false
+            // Resetear detectores si señal no es válida
+            elgendiDetector.reset()
+            derivativeDetector.reset()
+            heartRateFusion.reset()
         }
 
         // 4. Clinical Metrics (ONLY IF VALID)
@@ -292,7 +362,7 @@ class MonitorViewModel(
             }
         }
 
-        // 5. Update Waveform Buffer
+        // 5. Update Waveform Buffer and Beat History
         val sample = PPGSample(
             timestamp = timestamp,
             redMean = frame.redSrgb,
@@ -305,6 +375,20 @@ class MonitorViewModel(
 
         ppgBuffer.add(sample)
         if (ppgBuffer.size > maxBufferSize) ppgBuffer.removeAt(0)
+        
+        // Mantener historial de beats clasificados y eventos
+        val currentClassifiedBeats = _uiState.value.classifiedBeats.toMutableList()
+        val currentArrhythmiaEvents = _uiState.value.arrhythmiaEvents.toMutableList()
+        
+        classifiedBeat?.let { 
+            currentClassifiedBeats.add(it)
+            if (currentClassifiedBeats.size > 50) currentClassifiedBeats.removeAt(0)
+        }
+        
+        arrhythmiaEvent?.let {
+            currentArrhythmiaEvents.add(it)
+            if (currentArrhythmiaEvents.size > 20) currentArrhythmiaEvents.removeAt(0)
+        }
 
         // 6. Technical / FPS
         var currentFps = _uiState.value.technicalData.fps
@@ -329,6 +413,8 @@ class MonitorViewModel(
             darkCalibrationCollecting = darkCollectionRemaining != null,
             darkCalibrationReady = darkCalibrationReadyFlag,
             ppgSamples = ppgBuffer.toList(),
+            classifiedBeats = currentClassifiedBeats.toList(),
+            arrhythmiaEvents = currentArrhythmiaEvents.toList(),
             technicalData = TechnicalData(
                 fps = currentFps,
                 rmssd = currentRmssd,
@@ -381,6 +467,7 @@ class MonitorViewModel(
     override fun onCleared() {
         super.onCleared()
         cameraController.stop()
+        motionSensorController.stop()
         feedbackController.release()
     }
 
@@ -392,5 +479,19 @@ class MonitorViewModel(
     fun toggleVibration(enabled: Boolean) {
         feedbackController.vibrationEnabled = enabled
         _uiState.value = _uiState.value.copy(vibrationEnabled = enabled)
+    }
+    
+    fun toggleCalibrationScreen(show: Boolean) {
+        _uiState.value = _uiState.value.copy(showCalibrationScreen = show)
+    }
+    
+    fun getDetectionStats(): DetectionStats {
+        return DetectionStats(
+            elgendiStats = elgendiDetector.getStats(),
+            derivativeStats = derivativeDetector.getStats(),
+            fusionStats = heartRateFusion.getFusionStats(),
+            beatClassifierStats = beatClassifier.getClassificationStats(),
+            arrhythmiaStats = arrhythmiaScreening.getRecentEventsSummary()
+        )
     }
 }

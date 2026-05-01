@@ -130,12 +130,21 @@ fun FullScreenMonitor(viewModel: MonitorViewModel) {
         .background(MedicalBlack)) {
         
         // 1. MONITOR CARDIACO FULL SCREEN (Background Layer)
-        PPGWaveformCanvas(
-            samples = state.ppgSamples,
-            isMeasuring = state.isMeasuring,
-            rhythmStatus = state.rhythmStatus,
-            modifier = Modifier.fillMaxSize()
-        )
+        if (!state.showCalibrationScreen) {
+            PPGWaveformCanvas(
+                samples = state.ppgSamples,
+                isMeasuring = state.isMeasuring,
+                rhythmStatus = state.rhythmStatus,
+                classifiedBeats = state.classifiedBeats,
+                arrhythmiaEvents = state.arrhythmiaEvents,
+                modifier = Modifier.fillMaxSize()
+            )
+        } else {
+            CalibrationScreen(
+                onBackToMonitor = { viewModel.toggleCalibrationScreen(false) },
+                modifier = Modifier.fillMaxSize()
+            )
+        }
 
         // 2. SCANNING OVERLAY (CRT SCAN LINE EFFECT)
         if (state.isMeasuring) {
@@ -267,6 +276,22 @@ fun FullScreenMonitor(viewModel: MonitorViewModel) {
                             checked = state.vibrationEnabled,
                             onCheckedChange = { viewModel.toggleVibration(it) },
                             colors = SwitchDefaults.colors(checkedThumbColor = MedicalGreen)
+                        )
+                    }
+                    
+                    Spacer(modifier = Modifier.height(12.dp))
+                    
+                    OutlinedButton(
+                        onClick = { viewModel.toggleCalibrationScreen(true) },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = androidx.compose.foundation.shape.RectangleShape,
+                        border = androidx.compose.foundation.BorderStroke(1.dp, MedicalCyan)
+                    ) {
+                        Text(
+                            text = "CALIBRACIÓN SpO₂",
+                            style = Typography.labelSmall,
+                            color = MedicalCyan,
+                            fontWeight = FontWeight.Bold
                         )
                     }
                     

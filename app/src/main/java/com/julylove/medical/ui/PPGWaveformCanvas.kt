@@ -10,15 +10,21 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.dp
 import com.julylove.medical.signal.PPGSample
 import com.julylove.medical.signal.RhythmAnalysisEngine
+import com.julylove.medical.signal.BeatClassifier
+import com.julylove.medical.signal.ArrhythmiaScreening
 import com.julylove.medical.ui.theme.MedicalGreen
 import com.julylove.medical.ui.theme.MedicalGrid
 import com.julylove.medical.ui.theme.MedicalRed
+import com.julylove.medical.ui.theme.MedicalAmber
+import com.julylove.medical.ui.theme.MedicalCyan
 
 @Composable
 fun PPGWaveformCanvas(
     samples: List<PPGSample>,
     isMeasuring: Boolean,
     rhythmStatus: RhythmAnalysisEngine.RhythmStatus = RhythmAnalysisEngine.RhythmStatus.CALIBRATING,
+    classifiedBeats: List<BeatClassifier.ClassifiedBeat> = emptyList(),
+    arrhythmiaEvents: List<ArrhythmiaScreening.ArrhythmiaEvent> = emptyList(),
     modifier: Modifier = Modifier
 ) {
     // Use a secondary color for the "ghost" or background grid for medical feel
@@ -77,20 +83,58 @@ fun PPGWaveformCanvas(
                 path.lineTo(x, y)
             }
             
-            // Draw Beat Detection Markers (Sistolic Peaks)
+        // Draw Beat Detection Markers with classification
             if (sample.isPeak) {
+                // Find corresponding classified beat for this timestamp
+                val classifiedBeat = classifiedBeats.find { 
+                    abs(it.timestampNs - sample.timestamp) < 50_000_000L // 50ms tolerance
+                }
+                
+                val (markerColor, markerSize, showVertical) = when (classifiedBeat?.beatType) {
+                    BeatClassifier.BeatType.NORMAL -> Triple(MedicalGreen, 3.dp.toPx(), true)
+                    BeatClassifier.BeatType.SUSPECT_PREMATURE -> Triple(MedicalAmber, 4.dp.toPx(), true)
+                    BeatClassifier.BeatType.SUSPECT_PAUSE -> Triple(MedicalAmber, 4.dp.toPx(), true)
+                    BeatClassifier.BeatType.SUSPECT_MISSED -> Triple(MedicalRed, 5.dp.toPx(), true)
+                    BeatClassifier.BeatType.IRREGULAR -> Triple(MedicalRed, 4.dp.toPx(), true)
+                    BeatClassifier.BeatType.INVALID_SIGNAL -> Triple(MedicalGrid, 3.dp.toPx(), false)
+                    else -> Triple(MedicalRed, 3.dp.toPx(), true)
+                }
+                
+                // Draw peak marker
                 drawCircle(
-                    color = MedicalRed,
-                    radius = 3.dp.toPx(),
+                    color = markerColor,
+                    radius = markerSize,
                     center = Offset(x, y)
                 )
-                // Technical vertical marker for peak
-                drawLine(
-                    color = MedicalRed.copy(alpha = 0.3f),
-                    start = Offset(x, 0f),
-                    end = Offset(x, height),
-                    strokeWidth = 1f
-                )
+                
+                // Draw vertical marker for valid beats
+                if (showVertical) {
+                    drawLine(
+                        color = markerColor.copy(alpha = 0.3f),
+                        start = Offset(x, 0f),
+                        end = Offset(x, height),
+                        strokeWidth = 1f
+                    )
+                }
+                
+                // Draw classification label for anomalous beats
+                if (classifiedBeat != null && classifiedBeat.beatType != BeatClassifier.BeatType.NORMAL) {
+                    val label = when (classifiedBeat.beatType) {
+                        BeatClassifier.BeatType.SUSPECT_PREMATURE -> "PREM"
+                        BeatClassifier.BeatType.SUSPECT_PAUSE -> "PAUSA"
+                        BeatClassifier.BeatType.SUSPECT_MISSED -> "PERD"
+                        BeatClassifier.BeatType.IRREGULAR -> "IRREG"
+                        BeatClassifier.BeatType.INVALID_SIGNAL -> "INV"
+                        else -> ""
+                    }
+                    
+                    // Simple label above peak (could be enhanced with text drawing)
+                    drawCircle(
+                        color = markerColor,
+                        radius = 2.dp.toPx(),
+                        center = Offset(x, y - 20.dp.toPx())
+                    )
+                }
             }
         }
 
@@ -111,5 +155,51 @@ fun PPGWaveformCanvas(
             color = traceColor.copy(alpha = 0.3f),
             style = Stroke(width = 6.dp.toPx())
         )
+        
+        // Draw Arrhythmia Event Overlays
+        arrhythmiaEvents.forEach { event ->
+            val eventX = findEventXPosition(event.timestampNs, samples, width)
+            if (eventX != null) {
+                val (eventColor, eventHeight) = when (event.severity) {
+                    ArrhythmiaScreening.Severity.CRITICAL -> Pair(MedicalRed, height)
+                    ArrhythmiaScreening.Severity.HIGH -> Pair(MedicalRed, height * 0.8f)
+                    ArrhythmiaScreening.Severity.MODERATE -> Pair(MedicalAmber, height * 0.6f)
+                    ArrhythmiaScreening.Severity.LOW -> Pair(MedicalCyan, height * 0.4f)
+                }
+                
+                // Draw vertical event line
+                drawLine(
+                    color = eventColor.copy(alpha = 0.5f),
+                    start = Offset(eventX, height - eventHeight),
+                    end = Offset(eventX, height),
+                    strokeWidth = 3.dp.toPx()
+                )
+                
+                // Draw event marker
+                drawCircle(
+                    color = eventColor,
+                    radius = 4.dp.toPx(),
+                    center = Offset(eventX, height - eventHeight)
+                )
+            }
+        }
     }
+}
+
+private fun findEventXPosition(
+    eventTimestampNs: Long,
+    samples: List<PPGSample>,
+    canvasWidth: Float
+): Float? {
+    if (samples.isEmpty()) return null
+    
+    // Find sample closest to event timestamp
+    val closestSample = samples.minByOrNull { 
+        abs(it.timestamp - eventTimestampNs) 
+    } ?: return null
+    
+    val sampleIndex = samples.indexOf(closestSample)
+    val dx = canvasWidth / samples.size
+    
+    return sampleIndex * dx
 }
