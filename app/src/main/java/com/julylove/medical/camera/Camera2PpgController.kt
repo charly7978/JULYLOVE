@@ -33,7 +33,7 @@ class Camera2PpgController(private val context: Context) {
     private var lastLuxRetuneMs: Long = 0L
 
     interface OnFrameAvailableListener {
-        fun onFrame(red: Float, green: Float, blue: Float, timestamp: Long)
+        fun onFrame(frame: PpgCameraFrame, timestampNs: Long)
     }
 
     var listener: OnFrameAvailableListener? = null
@@ -229,12 +229,31 @@ class Camera2PpgController(private val context: Context) {
         var bSum = 0L
         var pixelCount = 0
 
+        val grid = 4
+        val blockYSum = LongArray(grid * grid)
+        val blockRSum = LongArray(grid * grid)
+        val blockCnt = IntArray(grid * grid)
+
+        val quadRSum = LongArray(4)
+        val quadCnt = IntArray(4)
+
         val yRowStride = yPlane.rowStride
         val uvRowStride = uPlane.rowStride
         val uvPixelStride = uPlane.pixelStride
 
         for (y in startY until startY + roiHeight step 2) {
             for (x in startX until startX + roiWidth step 2) {
+                val bx = (((x - startX) * grid) / roiWidth).coerceIn(0, grid - 1)
+                val by = (((y - startY) * grid) / roiHeight).coerceIn(0, grid - 1)
+                val bIdx = by * grid + bx
+
+                val quadrant = when {
+                    bx < grid / 2 && by < grid / 2 -> 0
+                    bx >= grid / 2 && by < grid / 2 -> 1
+                    bx < grid / 2 && by >= grid / 2 -> 2
+                    else -> 3
+                }
+
                 val yIndex = y * yRowStride + x
                 val uvIndex = (y / 2) * uvRowStride + (x / 2) * uvPixelStride
 
@@ -250,16 +269,56 @@ class Camera2PpgController(private val context: Context) {
                 gSum += g
                 bSum += b
                 pixelCount++
+
+                blockCnt[bIdx]++
+                blockYSum[bIdx] += yp
+                blockRSum[bIdx] += r
+
+                quadRSum[quadrant] += r
+                quadCnt[quadrant]++
             }
         }
 
         if (pixelCount > 0) {
-            listener?.onFrame(
-                rSum.toFloat() / pixelCount,
-                gSum.toFloat() / pixelCount,
-                bSum.toFloat() / pixelCount,
-                timestamp
+            val blockMean = FloatArray(grid * grid) { i ->
+                if (blockCnt[i] <= 0) 0f else blockYSum[i].toFloat() / blockCnt[i]
+            }
+            var bmSum = 0f
+            for (m in blockMean) bmSum += m
+            val bmAvg = bmSum / (grid * grid).toFloat()
+            var bmVarAcc = 0f
+            for (m in blockMean) {
+                val d = m - bmAvg
+                bmVarAcc += d * d
+            }
+            val blockStd = kotlin.math.sqrt(bmVarAcc / (grid * grid).toFloat())
+
+            var interGrad = 0f
+            for (by in 0 until grid) {
+                for (bx in 0 until grid) {
+                    val i = by * grid + bx
+                    val mi = blockMean[i]
+                    if (bx < grid - 1) interGrad += kotlin.math.abs(mi - blockMean[i + 1])
+                    if (by < grid - 1) interGrad += kotlin.math.abs(mi - blockMean[(by + 1) * grid + bx])
+                }
+            }
+
+            val qMean = FloatArray(4) { q ->
+                if (quadCnt[q] <= 0) 1f else quadRSum[q].toFloat() / quadCnt[q]
+            }
+            val qrMin = qMean.minOrNull()?.coerceAtLeast(1f) ?: 1f
+            val qrMax = qMean.maxOrNull()?.coerceAtLeast(qrMin) ?: qrMin
+            val quadrantBalance = qrMin / qrMax
+
+            val frame = PpgCameraFrame(
+                redSrgb = rSum.toFloat() / pixelCount,
+                greenSrgb = gSum.toFloat() / pixelCount,
+                blueSrgb = bSum.toFloat() / pixelCount,
+                quadrantBalanceRed = quadrantBalance.coerceIn(0f, 1f),
+                blockLumaStd = blockStd,
+                interBlockGradient = interGrad
             )
+            listener?.onFrame(frame, timestamp)
         }
     }
 }

@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.julylove.medical.camera.Camera2PpgController
+import com.julylove.medical.camera.PpgCameraFrame
 import com.julylove.medical.signal.*
 import com.julylove.medical.data.*
 import com.julylove.medical.haptics.*
@@ -27,7 +28,10 @@ class MonitorViewModel(
         val isMeasuring: Boolean = false,
         val technicalData: TechnicalData = TechnicalData(),
         val beepEnabled: Boolean = true,
-        val vibrationEnabled: Boolean = true
+        val vibrationEnabled: Boolean = true,
+        /** Adquisición de mediana línea‑negra (mantener dedo alejado o tapón opaco durante el contaje). */
+        val darkCalibrationCollecting: Boolean = false,
+        val darkCalibrationReady: Boolean = false
     )
 
     data class TechnicalData(
@@ -40,7 +44,13 @@ class MonitorViewModel(
         val signalConfidence: Float = 0f,
         val redDC: Float = 0f,
         val greenDC: Float = 0f,
-        val motionIntensity: Float = 0f
+        val motionIntensity: Float = 0f,
+        val quadrantBalanceRed: Float = 0f,
+        val blockLumaStd: Float = 0f,
+        val interBlockGradient: Float = 0f,
+        val odPulseScaled: Float = 0f,
+        /** I₀ estimado canal verde (lineal 0–1 tras dark offset si aplica). */
+        val odBaselineGreen01: Float = 0f
     )
 
     private val _uiState = MutableStateFlow(MonitorState())
@@ -60,7 +70,8 @@ class MonitorViewModel(
     // Pipeline Components
     private val physiologyClassifier = PpgPhysiologyClassifier()
     private val feedbackController = BeatFeedbackController(context)
-    private val detrender = DetrendingFilter(30)
+    private val odGreenExtractor = Radiometry.OpticalDensityGreen()
+    private val detrender = DetrendingFilter(14)
     private val butterworth = ButterworthBandpass(60f)
     private val smoother = SavitzkyGolayFilter()
     private val peakDetector = PeakDetectionEngine(60f)
@@ -72,6 +83,17 @@ class MonitorViewModel(
     private var frameCount = 0
     private var lastFpsTimestamp = 0L
     private var sessionId = ""
+
+    private var darkOffsetLinearR = 0f
+    private var darkOffsetLinearG = 0f
+    private var darkOffsetLinearB = 0f
+
+    /** Frames restantes de calibración oscura; null = inactivo. */
+    private var darkCollectionRemaining: Int? = null
+    private val darkScratchR = mutableListOf<Float>()
+    private val darkScratchG = mutableListOf<Float>()
+    private val darkScratchB = mutableListOf<Float>()
+    private var darkCalibrationReadyFlag = false
 
     init {
         cameraController.listener = this
@@ -93,7 +115,21 @@ class MonitorViewModel(
         opticalRedWindow.clear()
         opticalGreenWindow.clear()
         opticalBlueWindow.clear()
+        physiologyClassifier.reset()
         peakDetector.reset()
+        rhythmEngine.reset()
+        detrender.reset()
+        butterworth.reset()
+        smoother.reset()
+        odGreenExtractor.reset()
+        darkOffsetLinearR = 0f
+        darkOffsetLinearG = 0f
+        darkOffsetLinearB = 0f
+        darkCollectionRemaining = null
+        darkCalibrationReadyFlag = false
+        darkScratchR.clear()
+        darkScratchG.clear()
+        darkScratchB.clear()
         cameraController.start()
         motionDetector.start()
         _uiState.value = _uiState.value.copy(isMeasuring = true, bpm = 0, spo2 = 0f)
@@ -128,13 +164,41 @@ class MonitorViewModel(
         _uiState.value = _uiState.value.copy(isMeasuring = false)
     }
 
-    override fun onFrame(red: Float, green: Float, blue: Float, timestamp: Long) {
+    override fun onFrame(frame: PpgCameraFrame, timestampNs: Long) {
+        val timestamp = timestampNs
         val isMoving = motionDetector.isMoving
 
-        pushOpticalWindow(red, green, blue)
+        if (darkCollectionRemaining != null && darkCollectionRemaining!! > 0) {
+            darkScratchR.add(Radiometry.srgbByteToLinear(frame.redSrgb))
+            darkScratchG.add(Radiometry.srgbByteToLinear(frame.greenSrgb))
+            darkScratchB.add(Radiometry.srgbByteToLinear(frame.blueSrgb))
+            darkCollectionRemaining = darkCollectionRemaining!! - 1
+            if (darkCollectionRemaining == 0) {
+                darkOffsetLinearR = medianLinear(darkScratchR)
+                darkOffsetLinearG = medianLinear(darkScratchG)
+                darkOffsetLinearB = medianLinear(darkScratchB)
+                darkCalibrationReadyFlag = true
+                darkCollectionRemaining = null
+                odGreenExtractor.reset()
+                detrender.reset()
+                butterworth.reset()
+                smoother.reset()
+                physiologyClassifier.reset()
+            }
+        }
 
-        // 1. Signal Processing (dominio temporal antes de clasificar)
-        val rawValue = green
+        val r01 = Radiometry.linear01WithDark(frame.redSrgb, darkOffsetLinearR)
+        val g01 = Radiometry.linear01WithDark(frame.greenSrgb, darkOffsetLinearG)
+        val b01 = Radiometry.linear01WithDark(frame.blueSrgb, darkOffsetLinearB)
+
+        val rLin = r01 * 255f
+        val gLin = g01 * 255f
+        val bLin = b01 * 255f
+        pushOpticalWindow(rLin, gLin, bLin)
+
+        // 1. ln(I/I₀) en verde escalado → detrend fino solo para deriva muy lenta residual
+        val odPulseScaled = odGreenExtractor.pushScaledPulse(g01)
+        val rawValue = odPulseScaled
         val detrended = detrender.filter(rawValue)
         val bandpassed = butterworth.filter(detrended)
         val filtered = smoother.filter(bandpassed)
@@ -142,13 +206,11 @@ class MonitorViewModel(
         // 2. Physiology Validation (Gatekeeper)
         val validityState = physiologyClassifier.classify(
             filteredValue = filtered,
-            redMean = red,
-            greenMean = green,
-            blueMean = blue,
+            frame = frame,
             isMoving = isMoving
         )
 
-        val perfusionProxy = ((kotlin.math.abs(filtered) + 1e-3f) / red.coerceAtLeast(1f)) * 100f
+        val perfusionProxy = ((kotlin.math.abs(filtered) + 1e-3f) / frame.redSrgb.coerceAtLeast(1f)) * 100f
         val sqiFrame = if (validityState == PpgValidityState.PPG_VALID) {
             SignalQualityIndex.fromOpticalStreams(
                 redHistory = opticalRedWindow,
@@ -204,7 +266,7 @@ class MonitorViewModel(
                 lastPeakTime = timestamp
             }
 
-            val spo2Result = spo2Estimator.process(red, green, blue, sqiFrame)
+            val spo2Result = spo2Estimator.process(rLin, gLin, bLin, sqiFrame)
             currentSpo2 = spo2Result.spo2
             currentSpo2Status = spo2Result.status
         } else {
@@ -225,15 +287,16 @@ class MonitorViewModel(
                 butterworth.reset()
                 smoother.reset()
                 peakDetector.reset()
+                odGreenExtractor.reset()
             }
         }
 
         // 5. Update Waveform Buffer
         val sample = PPGSample(
             timestamp = timestamp,
-            redMean = red,
-            greenMean = green,
-            blueMean = blue,
+            redMean = frame.redSrgb,
+            greenMean = frame.greenSrgb,
+            blueMean = frame.blueSrgb,
             filteredValue = filtered,
             isPeak = isPeak,
             sqi = sqiFrame
@@ -260,6 +323,8 @@ class MonitorViewModel(
             spo2Status = currentSpo2Status,
             validityState = validityState,
             rhythmStatus = currentRhythm,
+            darkCalibrationCollecting = darkCollectionRemaining != null,
+            darkCalibrationReady = darkCalibrationReadyFlag,
             ppgSamples = ppgBuffer.toList(),
             technicalData = TechnicalData(
                 fps = currentFps,
@@ -269,11 +334,36 @@ class MonitorViewModel(
                 shannonEntropyBits = currentH,
                 sampleEntropy = currentSampEn,
                 signalConfidence = if (validityState == PpgValidityState.PPG_VALID) sqiFrame else 0.15f,
-                redDC = red,
-                greenDC = green,
-                motionIntensity = motionDetector.motionIntensity
+                redDC = frame.redSrgb,
+                greenDC = frame.greenSrgb,
+                motionIntensity = motionDetector.motionIntensity,
+                quadrantBalanceRed = frame.quadrantBalanceRed,
+                blockLumaStd = frame.blockLumaStd,
+                interBlockGradient = frame.interBlockGradient,
+                odPulseScaled = odPulseScaled,
+                odBaselineGreen01 = odGreenExtractor.baselineGreen01()
             )
         )
+    }
+
+    /**
+     * Con la sesión de cámara **ya en marcha**: tapar lente con dedo índice de espaldas,
+     * superficie mate u obturador durante ~72 frames (~1,2 s a 60 fps); mediana‑offset por canal en lineal 0–1.
+     */
+    fun startDarkFrameCalibration() {
+        if (!_uiState.value.isMeasuring || darkCollectionRemaining != null) return
+        darkScratchR.clear()
+        darkScratchG.clear()
+        darkScratchB.clear()
+        darkCollectionRemaining = 72
+    }
+
+    private fun medianLinear(samples: MutableList<Float>): Float {
+        if (samples.isEmpty()) return 0f
+        val sorted = samples.sorted()
+        val n = sorted.size
+        val m = n / 2
+        return if (n % 2 == 1) sorted[m] else (sorted[m - 1] + sorted[m]) * 0.5f
     }
 
     private fun pushOpticalWindow(red: Float, green: Float, blue: Float) {

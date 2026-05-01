@@ -225,8 +225,21 @@ fun FullScreenMonitor(viewModel: MonitorViewModel) {
                         "SAMPEN",
                         state.technicalData.sampleEntropy?.let { "%.3f".format(it) } ?: "—"
                     )
+                    TechnicalValue("QBAL_R", "${"%.3f".format(state.technicalData.quadrantBalanceRed)}")
+                    TechnicalValue("SIG_BLOK", "${"%.2f".format(state.technicalData.blockLumaStd)}")
+                    TechnicalValue("GRAD_I", "${"%.1f".format(state.technicalData.interBlockGradient)}")
                     TechnicalValue("INDICE_MOV", "${"%.3f".format(state.technicalData.motionIntensity)}")
                     TechnicalValue("FPS_MUESTREO", "${state.technicalData.fps}")
+                    TechnicalValue("LN_I_I0", "${"%.4f".format(state.technicalData.odPulseScaled)}")
+                    TechnicalValue("I0_VERDE", "${"%.5f".format(state.technicalData.odBaselineGreen01)}")
+                    TechnicalValue(
+                        "OSC_CALIB",
+                        when {
+                            state.darkCalibrationCollecting -> "ADQUIER..."
+                            state.darkCalibrationReady -> "LISTO"
+                            else -> "---"
+                        }
+                    )
                     
                     Spacer(modifier = Modifier.height(12.dp))
                     
@@ -247,6 +260,27 @@ fun FullScreenMonitor(viewModel: MonitorViewModel) {
                         )
                     }
                     
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    OutlinedButton(
+                        onClick = { viewModel.startDarkFrameCalibration() },
+                        enabled = state.isMeasuring && !state.darkCalibrationCollecting,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = androidx.compose.ui.graphics.RectangleShape,
+                        border = androidx.compose.foundation.BorderStroke(1.dp, MedicalGrid)
+                    ) {
+                        Text(
+                            text = when {
+                                state.darkCalibrationCollecting -> "CAPTURA OSCURA…"
+                                state.darkCalibrationReady -> "CAL. OSCURO: OK"
+                                else -> "CAL. OSCURO (~1 s tapado)"
+                            },
+                            style = Typography.labelSmall,
+                            color = MedicalAmber,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
                     Spacer(modifier = Modifier.height(16.dp))
                     
                     Button(

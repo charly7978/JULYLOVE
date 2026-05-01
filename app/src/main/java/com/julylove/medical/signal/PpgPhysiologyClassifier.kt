@@ -1,57 +1,60 @@
 package com.julylove.medical.signal
 
-import kotlin.math.abs
+import com.julylove.medical.camera.PpgCameraFrame
 
 /**
- * PpgPhysiologyClassifier: The "gatekeeper" of the clinical pipeline.
- * It analyzes optical signals to ensure they originate from a human finger
- * and not a static red object or noise.
+ * Gatekeeper: cromático + pulsátil temporal + rejilla espacial 4×4 (cobertura dedo‑lente, textura‑presión).
+ * Objetivos: rechazar objeto rojo puntual, halo parcial abierto (“ventana”), tapa táctil muy uniforme‑plástico.
  */
 class PpgPhysiologyClassifier {
 
     private val signalBuffer = mutableListOf<Float>()
-    private val windowSize = 150 // ~2.5 seconds at 60fps
+    private val windowSize = 150
+
+    fun reset() {
+        signalBuffer.clear()
+    }
 
     fun classify(
         filteredValue: Float,
-        redMean: Float,
-        greenMean: Float,
-        blueMean: Float,
-        isMoving: Boolean
+        frame: PpgCameraFrame,
+        isMoving: Boolean,
     ): PpgValidityState {
-        
-        // 1. Basic Hardware/Optical Checks
+        val redMean = frame.redSrgb
+        val greenMean = frame.greenSrgb
+        val blueMean = frame.blueSrgb
+
         if (redMean > 252f) return PpgValidityState.SATURATED
         if (redMean < 30f) return PpgValidityState.LOW_PERFUSION
-        
-        // 2. Chromatic Check: Human tissue with flash should be heavily dominated by Red
-        // and have a specific relationship with Green.
-        // Physiological tissue reflection: Red >> Green > Blue
+
         val isChromaticLikelyHuman = redMean > (greenMean * 1.5f) && greenMean >= (blueMean * 0.9f)
         if (!isChromaticLikelyHuman) return PpgValidityState.NO_PPG_PHYSIOLOGICAL_SIGNAL
 
-        // 3. Pulsatility Check: Analyze signal variance in the buffer
+        // Cobertura espacial cuadrántica — dedo descentrado suele producir vignette marcado intra‑ROI.
+        if (frame.quadrantBalanceRed < 0.55f && redMean > 45f) {
+            return PpgValidityState.SEARCHING_PPG
+        }
+
+        // Superficie demasiado homogénea (pinta roja mate, funda nítida puntual sobre lente abierto).
+        if (frame.interBlockGradient < 1.8f && frame.blockLumaStd < 2.8f && redMean > 90f && frame.quadrantBalanceRed > 0.92f) {
+            return PpgValidityState.NO_PPG_PHYSIOLOGICAL_SIGNAL
+        }
+
         signalBuffer.add(filteredValue)
         if (signalBuffer.size > windowSize) signalBuffer.removeAt(0)
 
         if (signalBuffer.size < windowSize) return PpgValidityState.SEARCHING_PPG
 
-        // Calculate AC/DC Proxy
         val dc = redMean
         val ac = calculateRMS(signalBuffer)
-        val perfusionIndex = (ac / dc) * 100
+        val perfusionIndex = (ac / dc.coerceAtLeast(1f)) * 100
 
-        // Physiological PI for PPG is usually 0.1% to 5.0%
-        if (perfusionIndex < 0.05f) return PpgValidityState.NO_PPG_PHYSIOLOGICAL_SIGNAL
-        
+        if (perfusionIndex < 0.045f) return PpgValidityState.NO_PPG_PHYSIOLOGICAL_SIGNAL
+
         if (isMoving) return PpgValidityState.MOTION_ARTIFACT
 
-        // 4. Rhythmicity Check (Simplified for now, can be expanded with FFT/Autocorrelation)
         val crossings = countZeroCrossings(signalBuffer)
-        // At 60fps, 2.5s is 150 samples. 
-        // 40bpm = 0.66Hz -> ~1.6 cycles in 2.5s -> ~3 zero crossings
-        // 200bpm = 3.33Hz -> ~8.3 cycles in 2.5s -> ~16 zero crossings
-        if (crossings !in 3..20) return PpgValidityState.NO_PPG_PHYSIOLOGICAL_SIGNAL
+        if (crossings !in 3..22) return PpgValidityState.NO_PPG_PHYSIOLOGICAL_SIGNAL
 
         return PpgValidityState.PPG_VALID
     }
