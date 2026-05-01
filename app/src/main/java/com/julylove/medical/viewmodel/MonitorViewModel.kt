@@ -58,7 +58,7 @@ class MonitorViewModel(
     private val smoother = SavitzkyGolayFilter()
     private val peakDetector = PeakDetectionEngine(60f)
     private val rhythmEngine = RhythmAnalysisEngine()
-    private val spo2Estimator = SpO2Estimator()
+    private val spo2Estimator = Spo2Estimator()
     private val motionDetector = MotionArtifactDetector(context)
 
     private var lastPeakTime = 0L
