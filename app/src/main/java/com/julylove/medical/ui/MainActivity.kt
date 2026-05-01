@@ -29,16 +29,15 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
-import com.julylove.medical.camera.Camera2Controller
-import com.julylove.medical.signal.FingerDetectionEngine
+import com.julylove.medical.camera.Camera2PpgController
+import com.julylove.medical.signal.PpgValidityState
 import com.julylove.medical.signal.RhythmAnalysisEngine
-import com.julylove.medical.signal.SignalQualityIndexEngine
 import com.julylove.medical.ui.theme.*
 import com.julylove.medical.viewmodel.MonitorViewModel
 
 class MainActivity : ComponentActivity() {
 
-    private lateinit var cameraController: Camera2Controller
+    private lateinit var cameraController: Camera2PpgController
     private lateinit var viewModel: MonitorViewModel
 
     private val requestPermissionLauncher = registerForActivityResult(
@@ -59,7 +58,7 @@ class MainActivity : ComponentActivity() {
         // Hide System Bars for Immersive Mode
         hideSystemUI()
         
-        cameraController = Camera2Controller(this)
+        cameraController = Camera2PpgController(this)
         viewModel = MonitorViewModel(applicationContext, cameraController)
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
@@ -120,12 +119,16 @@ fun FullScreenMonitor(viewModel: MonitorViewModel) {
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Column {
-                    Text("UNIT_ID: FORENSIC-7978", style = Typography.labelSmall, color = MedicalTextGray)
-                    Text("STATUS: ${if (state.isMeasuring) "ACTIVE_ACQUISITION" else "STANDBY"}", 
+                    Text("ID_UNIDAD: FORENSIC-7978", style = Typography.labelSmall, color = MedicalTextGray)
+                    Text("ESTADO: ${translateValidity(state.validityState)}", 
                         style = Typography.labelSmall, 
-                        color = if (state.isMeasuring) MedicalGreen else MedicalAmber)
+                        color = when(state.validityState) {
+                            PpgValidityState.PPG_VALID -> MedicalGreen
+                            PpgValidityState.PPG_CANDIDATE, PpgValidityState.SEARCHING_PPG -> MedicalAmber
+                            else -> MedicalRed
+                        })
                 }
-                Text("JULYLOVE BIO-MONITOR v1.0", style = Typography.labelSmall, color = MedicalTextGray)
+                Text("BIO-MONITOR JULYLOVE v1.0", style = Typography.labelSmall, color = MedicalTextGray)
             }
             HorizontalDivider(color = MedicalGrid, thickness = 1.dp, modifier = Modifier.padding(top = 4.dp))
         }
@@ -137,11 +140,11 @@ fun FullScreenMonitor(viewModel: MonitorViewModel) {
                 .padding(end = 24.dp),
             horizontalAlignment = Alignment.End
         ) {
-            // HEART RATE SECTION
-            Text("HEART RATE", style = Typography.labelSmall, color = MedicalTextGray)
+            // SECCIÓN FRECUENCIA CARDÍACA
+            Text("RITMO CARDÍACO", style = Typography.labelSmall, color = MedicalTextGray)
             Row(verticalAlignment = Alignment.Bottom) {
                 Text(
-                    text = if (state.bpm > 0 && state.sqiLevel != SignalQualityIndexEngine.QualityLevel.NO_INTERPRETABLE) 
+                    text = if (state.bpm > 0 && state.validityState == PpgValidityState.PPG_VALID) 
                         state.bpm.toString() else "--",
                     style = Typography.displayLarge.copy(fontSize = 100.sp, lineHeight = 100.sp),
                     color = when(state.rhythmStatus) {
@@ -150,16 +153,16 @@ fun FullScreenMonitor(viewModel: MonitorViewModel) {
                         else -> MedicalGreen
                     }
                 )
-                Text("BPM", style = Typography.headlineMedium, color = MedicalTextGray, modifier = Modifier.padding(bottom = 16.dp, start = 4.dp))
+                Text("LPM", style = Typography.headlineMedium, color = MedicalTextGray, modifier = Modifier.padding(bottom = 16.dp, start = 4.dp))
             }
 
             Spacer(modifier = Modifier.height(24.dp))
 
-            // SpO2 SECTION
-            Text("OXYGEN SAT", style = Typography.labelSmall, color = MedicalTextGray)
+            // SECCIÓN SpO2
+            Text("SAT. OXÍGENO", style = Typography.labelSmall, color = MedicalTextGray)
             Row(verticalAlignment = Alignment.Bottom) {
                 Text(
-                    text = if (state.spo2 > 0 && state.sqiLevel != SignalQualityIndexEngine.QualityLevel.NO_INTERPRETABLE) 
+                    text = if (state.spo2 > 0 && state.validityState == PpgValidityState.PPG_VALID) 
                         state.spo2.toInt().toString() else "--",
                     style = Typography.displayLarge.copy(fontSize = 60.sp, lineHeight = 60.sp),
                     color = MedicalCyan
@@ -184,16 +187,34 @@ fun FullScreenMonitor(viewModel: MonitorViewModel) {
                     .padding(12.dp)
             ) {
                 Column {
-                    Text("SIGNAL_ANALYSIS", style = Typography.labelSmall, color = MedicalCyan, fontWeight = FontWeight.Bold)
+                    Text("ANÁLISIS_DE_SEÑAL", style = Typography.labelSmall, color = MedicalCyan, fontWeight = FontWeight.Bold)
                     Spacer(modifier = Modifier.height(8.dp))
-                    TechnicalValue("SQI_LEVEL", state.sqiLevel.name)
-                    TechnicalValue("CONFIDENCE", "${(state.technicalData.signalConfidence * 100).toInt()}%")
+                    TechnicalValue("VALIDEZ", translateValidity(state.validityState))
+                    TechnicalValue("CONFIANZA", "${(state.technicalData.signalConfidence * 100).toInt()}%")
                     TechnicalValue("RMSSD", "${"%.1f".format(state.technicalData.rmssd)} ms")
                     TechnicalValue("pNN50", "${"%.1f".format(state.technicalData.pnn50)}%")
-                    TechnicalValue("VAR_COEFF", "${"%.1f".format(state.technicalData.cv)}%")
-                    TechnicalValue("MOTION_IDX", "${"%.3f".format(state.technicalData.motionIntensity)}")
-                    TechnicalValue("SAMPLE_FPS", "${state.technicalData.fps}")
-                    TechnicalValue("DC_OFFSET", "${state.technicalData.greenDC.toInt()}")
+                    TechnicalValue("COEF_VAR", "${"%.1f".format(state.technicalData.cv)}%")
+                    TechnicalValue("INDICE_MOV", "${"%.3f".format(state.technicalData.motionIntensity)}")
+                    TechnicalValue("FPS_MUESTREO", "${state.technicalData.fps}")
+                    
+                    Spacer(modifier = Modifier.height(12.dp))
+                    
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("BEEP", style = Typography.labelSmall, color = MedicalTextGray)
+                        Switch(
+                            checked = state.beepEnabled,
+                            onCheckedChange = { viewModel.toggleBeep(it) },
+                            colors = SwitchDefaults.colors(checkedThumbColor = MedicalGreen)
+                        )
+                    }
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("HÁPTICO", style = Typography.labelSmall, color = MedicalTextGray)
+                        Switch(
+                            checked = state.vibrationEnabled,
+                            onCheckedChange = { viewModel.toggleVibration(it) },
+                            colors = SwitchDefaults.colors(checkedThumbColor = MedicalGreen)
+                        )
+                    }
                     
                     Spacer(modifier = Modifier.height(16.dp))
                     
@@ -206,7 +227,7 @@ fun FullScreenMonitor(viewModel: MonitorViewModel) {
                         )
                     ) {
                         Text(
-                            text = if (state.isMeasuring) "STOP ANALYZER" else "INIT ANALYZER",
+                            text = if (state.isMeasuring) "DETENER ANALIZADOR" else "INICIAR ANALIZADOR",
                             color = MedicalBlack,
                             style = Typography.bodyMedium,
                             fontWeight = FontWeight.Bold
@@ -216,8 +237,8 @@ fun FullScreenMonitor(viewModel: MonitorViewModel) {
             }
         }
 
-        // Finger Position Warning
-        if (state.isMeasuring && state.fingerState != FingerDetectionEngine.FingerState.SENAL_VALIDA) {
+        // State Overlays
+        if (state.isMeasuring && state.validityState != PpgValidityState.PPG_VALID) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -225,17 +246,22 @@ fun FullScreenMonitor(viewModel: MonitorViewModel) {
                 contentAlignment = Alignment.Center
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    CircularProgressIndicator(color = MedicalGreen)
+                    if (state.validityState == PpgValidityState.SEARCHING_PPG || state.validityState == PpgValidityState.PPG_CANDIDATE) {
+                        CircularProgressIndicator(color = MedicalAmber)
+                    }
                     Spacer(modifier = Modifier.height(20.dp))
                     Text(
-                        text = when(state.fingerState) {
-                            FingerDetectionEngine.FingerState.NO_DEDO -> "PLACE INDEX FINGER ON CAMERA & FLASH"
-                            FingerDetectionEngine.FingerState.POSICIONANDO -> "STABILIZING OPTICAL SIGNAL..."
-                            FingerDetectionEngine.FingerState.PRESION_EXCESIVA -> "TOO MUCH PRESSURE - RELAX FINGER"
-                            else -> "SIGNAL INTERRUPTED"
+                        text = when(state.validityState) {
+                            PpgValidityState.NO_PPG_PHYSIOLOGICAL_SIGNAL -> "SEÑAL NO FISIOLÓGICA DETECTADA\n(Verifique la posición del dedo)"
+                            PpgValidityState.SEARCHING_PPG -> "ANALIZANDO PULSATILIDAD..."
+                            PpgValidityState.PPG_CANDIDATE -> "ESTABILIZANDO SEÑAL PPG..."
+                            PpgValidityState.SATURATED -> "SEÑAL SATURADA - REDUZCA LA PRESIÓN"
+                            PpgValidityState.MOTION_ARTIFACT -> "MOVIMIENTO EXCESIVO DETECTADO"
+                            PpgValidityState.LOW_PERFUSION -> "BAJA PERFUSIÓN - CALIENTE EL DEDO"
+                            else -> "LISTO PARA ADQUISICIÓN"
                         },
                         style = Typography.headlineMedium,
-                        color = MedicalGreen,
+                        color = if (state.validityState == PpgValidityState.NO_PPG_PHYSIOLOGICAL_SIGNAL) MedicalRed else MedicalAmber,
                         textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                         modifier = Modifier.padding(horizontal = 40.dp)
                     )
@@ -277,11 +303,11 @@ fun TechnicalValue(label: String, value: String) {
 
 @Composable
 fun StatusBadge(status: RhythmAnalysisEngine.RhythmStatus) {
-    val color = when(status) {
-        RhythmAnalysisEngine.RhythmStatus.REGULAR -> MedicalGreen
-        RhythmAnalysisEngine.RhythmStatus.IRREGULAR -> MedicalAmber
-        RhythmAnalysisEngine.RhythmStatus.SUSPECTED_ARRHYTHMIA -> MedicalRed
-        else -> MedicalTextGray
+    val (color, text) = when(status) {
+        RhythmAnalysisEngine.RhythmStatus.REGULAR -> MedicalGreen to "RITMO REGULAR"
+        RhythmAnalysisEngine.RhythmStatus.IRREGULAR -> MedicalAmber to "RITMO IRREGULAR"
+        RhythmAnalysisEngine.RhythmStatus.SUSPECTED_ARRHYTHMIA -> MedicalRed to "SOSPECHA DE ARRITMIA"
+        RhythmAnalysisEngine.RhythmStatus.CALIBRATING -> MedicalTextGray to "CALIBRANDO"
     }
     
     Surface(
@@ -290,10 +316,24 @@ fun StatusBadge(status: RhythmAnalysisEngine.RhythmStatus) {
         shape = androidx.compose.foundation.shape.RoundedCornerShape(4.dp)
     ) {
         Text(
-            text = status.name,
+            text = text,
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
             style = Typography.labelSmall,
             color = color
         )
+    }
+}
+
+fun translateValidity(state: PpgValidityState): String {
+    return when(state) {
+        PpgValidityState.MEASURING_RAW_OPTICAL -> "ADQUISICIÓN ÓPTICA"
+        PpgValidityState.NO_PPG_PHYSIOLOGICAL_SIGNAL -> "SIN SEÑAL FISIOLÓGICA"
+        PpgValidityState.SEARCHING_PPG -> "BUSCANDO PULSO"
+        PpgValidityState.PPG_CANDIDATE -> "CANDIDATO PPG"
+        PpgValidityState.PPG_VALID -> "SEÑAL VÁLIDA"
+        PpgValidityState.SATURATED -> "SATURACIÓN"
+        PpgValidityState.MOTION_ARTIFACT -> "ARTEFACTO DE MOVIMIENTO"
+        PpgValidityState.LOW_PERFUSION -> "BAJA PERFUSIÓN"
+        PpgValidityState.ERROR -> "ERROR DE SENSOR"
     }
 }

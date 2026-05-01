@@ -1,101 +1,80 @@
 package com.julylove.medical.signal
 
-import kotlin.math.log10
+import kotlin.math.sqrt
 
 /**
- * SpO2 Estimator using the Ratio-of-Ratios (RoR) method.
- * Formula: R = (AC_red / DC_red) / (AC_ir / DC_ir)
- * For smartphone PPG, we use Red and Blue or Green channels as proxies.
- * SpO2 % = A - B * R, where A and B are calibration constants.
+ * Spo2Estimator: Ratio-of-Ratios (RoR) implementation for PPG SpO2 estimation.
+ * Formula: R = (AC_red / DC_red) / (AC_green / DC_green)
+ * SpO2 = A - B * R
  */
-class SpO2Estimator {
-
-    data class SpO2Result(
-        val spo2: Float,
-        val confidence: Float,
-        val status: String
-    )
+class Spo2Estimator {
 
     data class CalibrationProfile(
         val name: String,
-        val a: Float,
-        val b: Float,
-        val useGreenAsIr: Boolean = true
+        val a: Double,
+        val b: Double
     )
 
     companion object {
-        val DEFAULT_PROFILE = CalibrationProfile("Generic", 110f, 25f)
-        
-        // Example device-specific profiles (hypothetical)
-        val PROFILES = mapOf(
-            "Pixel 6" to CalibrationProfile("Pixel 6", 112f, 28f),
-            "Samsung S21" to CalibrationProfile("Samsung S21", 108f, 22f),
-            "Generic" to DEFAULT_PROFILE
-        )
+        val DEFAULT_PROFILE = CalibrationProfile("Generic", 110.0, 25.0)
     }
 
     private var activeProfile = DEFAULT_PROFILE
+    
+    // AC/DC Tracking for RoR calculation
     private val redBuffer = mutableListOf<Float>()
-    private val irBuffer = mutableListOf<Float>() 
-    private val windowSize = 150 // ~2.5 seconds at 60fps
+    private val greenBuffer = mutableListOf<Float>()
+    private val windowSize = 150 // ~2-3 seconds
 
-    fun setProfileForDevice(model: String) {
-        activeProfile = PROFILES[model] ?: DEFAULT_PROFILE
-    }
+    data class Spo2Result(
+        val spo2: Float,
+        val confidence: Double,
+        val status: String
+    )
 
-    fun process(red: Float, green: Float, blue: Float, sqi: Float): SpO2Result {
+    fun process(
+        red: Float, green: Float, blue: Float,
+        sqi: Float
+    ): Spo2Result {
         redBuffer.add(red)
-        irBuffer.add(if (activeProfile.useGreenAsIr) green else blue)
-
+        greenBuffer.add(green)
         if (redBuffer.size > windowSize) {
             redBuffer.removeAt(0)
-            irBuffer.removeAt(0)
+            greenBuffer.removeAt(0)
         }
 
-        if (redBuffer.size < windowSize || sqi < 0.6f) {
-            return SpO2Result(0f, 0f, "CALIBRANDO / CALIDAD BAJA")
+        if (sqi < 0.5f || redBuffer.size < windowSize) {
+            return Spo2Result(0f, 0.0, "ESTABILIZANDO")
         }
 
-        val rRatio = calculateRatio(redBuffer, irBuffer)
+        val redAc = (redBuffer.maxOrNull() ?: 0f) - (redBuffer.minOrNull() ?: 0f)
+        val redDc = redBuffer.average().toFloat()
         
-        // Linear empirical model: SpO2 = A - B*R
-        val spo2 = (activeProfile.a - activeProfile.b * rRatio).coerceIn(70f, 100f)
-        
-        return SpO2Result(
-            spo2 = spo2,
-            confidence = sqi,
-            status = when {
-                spo2 < 90 -> "HIPOXIA CRÍTICA"
-                spo2 < 94 -> "HIPOXIA LEVE"
-                else -> "NORMAL"
-            }
-        )
-    }
+        val greenAc = (greenBuffer.maxOrNull() ?: 0f) - (greenBuffer.minOrNull() ?: 0f)
+        val greenDc = greenBuffer.average().toFloat()
 
-    private fun calculateRatio(red: List<Float>, ir: List<Float>): Float {
-        val dcRed = red.average().toFloat()
-        val dcIr = ir.average().toFloat()
-
-        if (dcRed == 0f || dcIr == 0f) return 1f
-
-        // AC is estimated as the standard deviation or Peak-to-Peak
-        val acRed = calculateAC(red, dcRed)
-        val acIr = calculateAC(ir, dcIr)
-
-        return (acRed / dcRed) / (acIr / dcIr)
-    }
-
-    private fun calculateAC(buffer: List<Float>, dc: Float): Float {
-        // RMS of the AC component
-        var sumSq = 0f
-        for (value in buffer) {
-            val ac = value - dc
-            sumSq += ac * ac
+        if (redDc < 1f || greenDc < 1f || greenAc < 0.01f) {
+            return Spo2Result(0f, 0.0, "SIGNAL_LOW")
         }
-        return kotlin.math.sqrt(sumSq / buffer.size)
+
+        val rRatio = (redAc / redDc) / (greenAc / greenDc)
+        val spo2 = (activeProfile.a - activeProfile.b * rRatio).toFloat().coerceIn(70f, 100f)
+        
+        val status = when {
+            spo2 < 90f -> "HIPOXIA CRÍTICA"
+            spo2 < 94f -> "HIPOXIA LEVE"
+            else -> "NORMAL"
+        }
+
+        return Spo2Result(spo2, sqi.toDouble(), status)
     }
-    
-    fun calibrate(actualSpO2: Float, currentRatio: Float) {
-        // Simple linear adjustment (Implementation of more complex calibration would go here)
+
+    fun setProfileForDevice(model: String) {
+        // Device specific calibration can be added here
+        activeProfile = DEFAULT_PROFILE
+    }
+
+    fun setProfile(profile: CalibrationProfile) {
+        activeProfile = profile
     }
 }

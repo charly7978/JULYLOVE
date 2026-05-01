@@ -8,10 +8,13 @@ import android.media.ImageReader
 import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
-import android.view.Surface
 import java.util.*
 
-class Camera2Controller(private val context: Context) {
+/**
+ * Camera2PpgController: Professional PPG acquisition using manual sensor control.
+ * Ensures stable torch, fixed exposure, and high-frequency YUV sampling.
+ */
+class Camera2PpgController(private val context: Context) {
     private var cameraManager: CameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
     private var cameraDevice: CameraDevice? = null
     private var captureSession: CameraCaptureSession? = null
@@ -26,6 +29,12 @@ class Camera2Controller(private val context: Context) {
 
     var listener: OnFrameAvailableListener? = null
 
+    // Telemetry
+    var actualFps: Int = 0
+        private set
+    private var frameCount = 0
+    private var lastFpsTimestamp = 0L
+
     fun start() {
         startBackgroundThread()
         openCamera()
@@ -33,12 +42,16 @@ class Camera2Controller(private val context: Context) {
 
     fun stop() {
         captureSession?.close()
+        captureSession = null
         cameraDevice?.close()
+        cameraDevice = null
+        imageReader?.close()
+        imageReader = null
         stopBackgroundThread()
     }
 
     private fun startBackgroundThread() {
-        backgroundThread = HandlerThread("CameraBackground").also { it.start() }
+        backgroundThread = HandlerThread("PpgCameraThread").also { it.start() }
         backgroundHandler = Handler(backgroundThread!!.looper)
     }
 
@@ -49,7 +62,7 @@ class Camera2Controller(private val context: Context) {
             backgroundThread = null
             backgroundHandler = null
         } catch (e: InterruptedException) {
-            Log.e("Camera2", "Interrupted", e)
+            Log.e("Camera2Ppg", "Thread interrupted", e)
         }
     }
 
@@ -79,10 +92,15 @@ class Camera2Controller(private val context: Context) {
     }
 
     private fun createCaptureSession() {
-        // High frame rate and small size for fast processing
+        // High frame rate and small size for fast processing (160x120 is enough for mean RGB)
         imageReader = ImageReader.newInstance(160, 120, ImageFormat.YUV_420_888, 2)
         imageReader?.setOnImageAvailableListener({ reader ->
-            val image = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
+            val image = try {
+                reader.acquireLatestImage()
+            } catch (e: Exception) {
+                null
+            } ?: return@setOnImageAvailableListener
+            
             processImage(image)
             image.close()
         }, backgroundHandler)
@@ -94,20 +112,47 @@ class Camera2Controller(private val context: Context) {
                 val requestBuilder = cameraDevice!!.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
                 requestBuilder.addTarget(surface)
                 
-                // Manual Control
+                // Force Torch
                 requestBuilder.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_TORCH)
-                requestBuilder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
-                requestBuilder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, 10_000_000L) // 10ms
-                requestBuilder.set(CaptureRequest.SENSOR_SENSITIVITY, 400)
+                
+                // Manual Exposure Control (if supported)
+                val characteristics = cameraManager.getCameraCharacteristics(cameraDevice!!.id)
+                val availableCapabilities = characteristics.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)
+                val hasManualControl = availableCapabilities?.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR) == true
+
+                if (hasManualControl) {
+                    requestBuilder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
+                    requestBuilder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, 10_000_000L) // 10ms
+                    requestBuilder.set(CaptureRequest.SENSOR_SENSITIVITY, 400)
+                } else {
+                    Log.w("Camera2Ppg", "Manual sensor control not supported, using auto exposure with torch.")
+                }
+                
+                // Optimization: Disable features that add latency
+                requestBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
+                requestBuilder.set(CaptureRequest.LENS_FOCUS_DISTANCE, 0.0f) // Infinity focus
                 
                 session.setRepeatingRequest(requestBuilder.build(), null, backgroundHandler)
             }
 
-            override fun onConfigureFailed(session: CameraCaptureSession) {}
+            override fun onConfigureFailed(session: CameraCaptureSession) {
+                Log.e("Camera2Ppg", "Failed to configure capture session")
+            }
         }, backgroundHandler)
     }
 
     private fun processImage(image: android.media.Image) {
+        val timestamp = image.timestamp // Nanoseconds
+        
+        // Calculate FPS
+        frameCount++
+        val now = System.currentTimeMillis()
+        if (now - lastFpsTimestamp >= 1000) {
+            actualFps = frameCount
+            frameCount = 0
+            lastFpsTimestamp = now
+        }
+
         val yPlane = image.planes[0]
         val uPlane = image.planes[1]
         val vPlane = image.planes[2]
@@ -119,16 +164,16 @@ class Camera2Controller(private val context: Context) {
         val width = image.width
         val height = image.height
         
-        // Define ROI: Central 25% of the frame
-        val roiWidth = width / 2
-        val roiHeight = height / 2
+        // ROI: Central 50% area (25% margin each side)
         val startX = width / 4
         val startY = height / 4
+        val roiWidth = width / 2
+        val roiHeight = height / 2
 
         var rSum = 0L
         var gSum = 0L
         var bSum = 0L
-        var count = 0
+        var pixelCount = 0
 
         val yRowStride = yPlane.rowStride
         val uvRowStride = uPlane.rowStride
@@ -143,11 +188,7 @@ class Camera2Controller(private val context: Context) {
                 val up = uBuffer.get(uvIndex).toInt() and 0xFF
                 val vp = vBuffer.get(uvIndex).toInt() and 0xFF
 
-                // YUV to RGB conversion (simplified but accurate for PPG)
-                // R = Y + 1.402 * (V - 128)
-                // G = Y - 0.344136 * (U - 128) - 0.714136 * (V - 128)
-                // B = Y + 1.772 * (U - 128)
-                
+                // YUV to RGB conversion
                 val r = (yp + 1.402f * (vp - 128)).coerceIn(0f, 255f).toInt()
                 val g = (yp - 0.344136f * (up - 128) - 0.714136f * (vp - 128)).coerceIn(0f, 255f).toInt()
                 val b = (yp + 1.772f * (up - 128)).coerceIn(0f, 255f).toInt()
@@ -155,16 +196,16 @@ class Camera2Controller(private val context: Context) {
                 rSum += r
                 gSum += g
                 bSum += b
-                count++
+                pixelCount++
             }
         }
 
-        if (count > 0) {
+        if (pixelCount > 0) {
             listener?.onFrame(
-                rSum.toFloat() / count,
-                gSum.toFloat() / count,
-                bSum.toFloat() / count,
-                System.currentTimeMillis()
+                rSum.toFloat() / pixelCount,
+                gSum.toFloat() / pixelCount,
+                bSum.toFloat() / pixelCount,
+                timestamp // Pass the hardware timestamp
             )
         }
     }
