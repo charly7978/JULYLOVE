@@ -8,20 +8,29 @@ import android.media.ImageReader
 import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
-import java.util.*
 
 /**
- * Camera2PpgController: Professional PPG acquisition using manual sensor control.
- * Ensures stable torch, fixed exposure, and high-frequency YUV sampling.
+ * Camera2 PPG: alta frecuencia de muestreo (30–60 fps típicos), tiempo de captura con
+ * [android.media.Image.getTimestamp] para alinear intervalos RR sin depender solo de reloj UI.
+ * Flash continuo + AE manual cuando el SOC lo permite; retono por lux ambiental (sensor aparte).
  */
 class Camera2PpgController(private val context: Context) {
-    private var cameraManager: CameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+    private val cameraManager: CameraManager =
+        context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+
     private var cameraDevice: CameraDevice? = null
     private var captureSession: CameraCaptureSession? = null
     private var imageReader: ImageReader? = null
-    
+    private var activeCameraId: String? = null
+
     private var backgroundThread: HandlerThread? = null
     private var backgroundHandler: Handler? = null
+
+    @Volatile
+    var ambientLux: Float = 80f
+
+    private var lastAppliedIso: Int = -1
+    private var lastLuxRetuneMs: Long = 0L
 
     interface OnFrameAvailableListener {
         fun onFrame(red: Float, green: Float, blue: Float, timestamp: Long)
@@ -29,7 +38,6 @@ class Camera2PpgController(private val context: Context) {
 
     var listener: OnFrameAvailableListener? = null
 
-    // Telemetry
     var actualFps: Int = 0
         private set
     private var frameCount = 0
@@ -47,7 +55,14 @@ class Camera2PpgController(private val context: Context) {
         cameraDevice = null
         imageReader?.close()
         imageReader = null
+        lastAppliedIso = -1
         stopBackgroundThread()
+    }
+
+    /** Invocar cuando cambie el fotosensor; aplana picos de saturación en exterior brillante. */
+    fun notifyAmbientLux(lux: Float) {
+        ambientLux = lux
+        backgroundHandler?.post { maybeRetuneExposureFromLux() }
     }
 
     private fun startBackgroundThread() {
@@ -73,6 +88,8 @@ class Camera2PpgController(private val context: Context) {
             characteristics.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK
         } ?: return
 
+        activeCameraId = cameraId
+
         cameraManager.openCamera(cameraId, object : CameraDevice.StateCallback() {
             override fun onOpened(camera: CameraDevice) {
                 cameraDevice = camera
@@ -92,7 +109,6 @@ class Camera2PpgController(private val context: Context) {
     }
 
     private fun createCaptureSession() {
-        // High frame rate and small size for fast processing (160x120 is enough for mean RGB)
         imageReader = ImageReader.newInstance(160, 120, ImageFormat.YUV_420_888, 2)
         imageReader?.setOnImageAvailableListener({ reader ->
             val image = try {
@@ -100,7 +116,7 @@ class Camera2PpgController(private val context: Context) {
             } catch (e: Exception) {
                 null
             } ?: return@setOnImageAvailableListener
-            
+
             processImage(image)
             image.close()
         }, backgroundHandler)
@@ -109,30 +125,8 @@ class Camera2PpgController(private val context: Context) {
         cameraDevice?.createCaptureSession(listOf(surface), object : CameraCaptureSession.StateCallback() {
             override fun onConfigured(session: CameraCaptureSession) {
                 captureSession = session
-                val requestBuilder = cameraDevice!!.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
-                requestBuilder.addTarget(surface)
-                
-                // Force Torch
-                requestBuilder.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_TORCH)
-                
-                // Manual Exposure Control (if supported)
-                val characteristics = cameraManager.getCameraCharacteristics(cameraDevice!!.id)
-                val availableCapabilities = characteristics.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)
-                val hasManualControl = availableCapabilities?.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR) == true
-
-                if (hasManualControl) {
-                    requestBuilder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
-                    requestBuilder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, 10_000_000L) // 10ms
-                    requestBuilder.set(CaptureRequest.SENSOR_SENSITIVITY, 400)
-                } else {
-                    Log.w("Camera2Ppg", "Manual sensor control not supported, using auto exposure with torch.")
-                }
-                
-                // Optimization: Disable features that add latency
-                requestBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
-                requestBuilder.set(CaptureRequest.LENS_FOCUS_DISTANCE, 0.0f) // Infinity focus
-                
-                session.setRepeatingRequest(requestBuilder.build(), null, backgroundHandler)
+                lastAppliedIso = -1
+                applyPreviewRequest(defaultIsoForCurrentLux())
             }
 
             override fun onConfigureFailed(session: CameraCaptureSession) {
@@ -141,10 +135,71 @@ class Camera2PpgController(private val context: Context) {
         }, backgroundHandler)
     }
 
+    private fun defaultIsoForCurrentLux(): Int = isoFromLux(ambientLux)
+
+    private fun isoFromLux(lux: Float): Int {
+        val v = lux.coerceIn(0f, 10_000f)
+        return when {
+            v < 20f -> 580
+            v < 150f -> 450
+            v < 450f -> 380
+            else -> 300
+        }.coerceIn(100, 1600)
+    }
+
+    private fun applyPreviewRequest(iso: Int) {
+        val device = cameraDevice ?: return
+        val session = captureSession ?: return
+        val reader = imageReader ?: return
+        val cid = activeCameraId ?: return
+
+        try {
+            val characteristics = cameraManager.getCameraCharacteristics(cid)
+            val caps = characteristics.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)
+            val hasManual = caps?.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR) == true
+
+            val builder = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
+            builder.addTarget(reader.surface)
+            builder.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_TORCH)
+
+            if (hasManual) {
+                builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
+                builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, 10_000_000L)
+                builder.set(CaptureRequest.SENSOR_SENSITIVITY, iso)
+                lastAppliedIso = iso
+            } else {
+                Log.w("Camera2Ppg", "Manual sensor control not supported, using auto exposure with torch.")
+            }
+
+            builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
+            builder.set(CaptureRequest.LENS_FOCUS_DISTANCE, 0.0f)
+
+            session.setRepeatingRequest(builder.build(), null, backgroundHandler)
+        } catch (e: Exception) {
+            Log.e("Camera2Ppg", "applyPreviewRequest failed", e)
+        }
+    }
+
+    private fun maybeRetuneExposureFromLux() {
+        val cid = activeCameraId ?: return
+        val characteristics = cameraManager.getCameraCharacteristics(cid)
+        val caps = characteristics.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)
+        val hasManual = caps?.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR) == true
+        if (!hasManual) return
+
+        val now = System.currentTimeMillis()
+        if (now - lastLuxRetuneMs < 450) return
+        lastLuxRetuneMs = now
+
+        val targetIso = isoFromLux(ambientLux)
+        if (lastAppliedIso != -1 && kotlin.math.abs(targetIso - lastAppliedIso) < 45) return
+
+        applyPreviewRequest(targetIso)
+    }
+
     private fun processImage(image: android.media.Image) {
-        val timestamp = image.timestamp // Nanoseconds
-        
-        // Calculate FPS
+        val timestamp = image.timestamp
+
         frameCount++
         val now = System.currentTimeMillis()
         if (now - lastFpsTimestamp >= 1000) {
@@ -163,8 +218,7 @@ class Camera2PpgController(private val context: Context) {
 
         val width = image.width
         val height = image.height
-        
-        // ROI: Central 50% area (25% margin each side)
+
         val startX = width / 4
         val startY = height / 4
         val roiWidth = width / 2
@@ -188,7 +242,6 @@ class Camera2PpgController(private val context: Context) {
                 val up = uBuffer.get(uvIndex).toInt() and 0xFF
                 val vp = vBuffer.get(uvIndex).toInt() and 0xFF
 
-                // YUV to RGB conversion
                 val r = (yp + 1.402f * (vp - 128)).coerceIn(0f, 255f).toInt()
                 val g = (yp - 0.344136f * (up - 128) - 0.714136f * (vp - 128)).coerceIn(0f, 255f).toInt()
                 val b = (yp + 1.772f * (up - 128)).coerceIn(0f, 255f).toInt()
@@ -205,7 +258,7 @@ class Camera2PpgController(private val context: Context) {
                 rSum.toFloat() / pixelCount,
                 gSum.toFloat() / pixelCount,
                 bSum.toFloat() / pixelCount,
-                timestamp // Pass the hardware timestamp
+                timestamp
             )
         }
     }

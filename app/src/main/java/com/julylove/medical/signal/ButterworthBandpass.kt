@@ -1,8 +1,10 @@
 package com.julylove.medical.signal
 
 /**
- * ButterworthBandpass: Filtro IIR de 2º orden para señales PPG (0.7 Hz a 4.0 Hz).
- * Las constantes se adaptan dinámicamente según la frecuencia de muestreo detectada.
+ * ButterworthBandpass: sección IIR de 2º orden (aprox. paso banda cardíaco ~0,5–5 Hz a Fs 30/60 Hz).
+ * Objetivo: aislar componente pulsátil atenuando deriva lenta (respiración) y ruido HF (movimiento, cuantización).
+ * Ver validación PPG smartphone (p. ej. Lee et al., Heart Rhythm 2012) y revisiones recientes (Tison et al., 2023–2024).
+ * Coeficientes precalculados para dos rejillas de muestreo (≈30 y ≈60 fps); [updateCoefficients] sincroniza con FPS real.
  */
 class ButterworthBandpass(sampleRate: Float = 60f) {
     private var x1 = 0f; private var x2 = 0f

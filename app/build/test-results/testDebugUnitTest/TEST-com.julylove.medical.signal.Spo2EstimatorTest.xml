@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.julylove.medical.signal.Spo2EstimatorTest" tests="3" skipped="0" failures="0" errors="0" timestamp="2026-05-01T20:40:51.203Z" hostname="DESKTOP-RM68DPP" time="0.021">
+  <properties/>
+  <testcase name="pulso sine rojo verde estable entrega valor distinto de cero con sqi alto" classname="com.julylove.medical.signal.Spo2EstimatorTest" time="0.005"/>
+  <testcase name="sqi inferior a umbral no expone resultado numerico de spo2" classname="com.julylove.medical.signal.Spo2EstimatorTest" time="0.003"/>
+  <testcase name="señal estable sin pulsacion suficiente no reporta spo2 positivo" classname="com.julylove.medical.signal.Spo2EstimatorTest" time="0.012"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

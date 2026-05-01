@@ -10,5 +10,10 @@ data class MeasurementSession(
     val averageBpm: Int,
     val averageSpo2: Float,
     val finalRhythmStatus: RhythmAnalysisEngine.RhythmStatus,
+    val finalRmssd: Double,
+    val finalShannonEntropyBits: Double,
+    val finalSampleEntropy: Double?,
+    val finalCvPercent: Double,
+    val motionMeanIntensity: Float,
     val samples: List<PPGSample>
 )

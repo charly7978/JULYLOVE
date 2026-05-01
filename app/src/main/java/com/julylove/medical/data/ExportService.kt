@@ -12,7 +12,9 @@ import java.text.SimpleDateFormat
 import java.util.*
 
 /**
- * Service to export measurement sessions to JSON and CSV for forensic/clinical audit.
+ * Exportación JSON/CSV para cadena de custodia (timestamps + RGB + filtrado + metadatos HRV).
+ * En despliegue forense se recomienda: almacenamiento cifrado (Android Keystore), control de acceso
+ * (BiometricPrompt / credenciales) y copia de seguridad WORM según protocolo interno; no sustituye PACS ni dictamen clínico.
  */
 class ExportService(private val context: Context) {
 
@@ -28,6 +30,11 @@ class ExportService(private val context: Context) {
                 put("avg_bpm", session.averageBpm)
                 put("avg_spo2", session.averageSpo2)
                 put("rhythm_status", session.finalRhythmStatus.name)
+                put("rmssd_ms", session.finalRmssd)
+                put("shannon_entropy_bits", session.finalShannonEntropyBits)
+                put("sample_entropy", session.finalSampleEntropy ?: JSONObject.NULL)
+                put("cv_rr_percent", session.finalCvPercent)
+                put("motion_intensity_mean", session.motionMeanIntensity)
                 
                 val samplesArray = JSONArray()
                 session.samples.forEach { sample ->

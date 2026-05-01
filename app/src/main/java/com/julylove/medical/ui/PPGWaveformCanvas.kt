@@ -3,14 +3,13 @@ package com.julylove.medical.ui
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.dp
 import com.julylove.medical.signal.PPGSample
+import com.julylove.medical.signal.RhythmAnalysisEngine
 import com.julylove.medical.ui.theme.MedicalGreen
 import com.julylove.medical.ui.theme.MedicalGrid
 import com.julylove.medical.ui.theme.MedicalRed
@@ -19,6 +18,7 @@ import com.julylove.medical.ui.theme.MedicalRed
 fun PPGWaveformCanvas(
     samples: List<PPGSample>,
     isMeasuring: Boolean,
+    rhythmStatus: RhythmAnalysisEngine.RhythmStatus = RhythmAnalysisEngine.RhythmStatus.CALIBRATING,
     modifier: Modifier = Modifier
 ) {
     // Use a secondary color for the "ghost" or background grid for medical feel
@@ -47,6 +47,11 @@ fun PPGWaveformCanvas(
         }
 
         if (!isMeasuring || samples.isEmpty()) return@Canvas
+
+        val traceColor = when (rhythmStatus) {
+            RhythmAnalysisEngine.RhythmStatus.SUSPECTED_ARRHYTHMIA -> MedicalRed
+            else -> MedicalGreen
+        }
 
         // 2. Waveform Rendering
         val maxVisibleSamples = samples.size
@@ -92,18 +97,18 @@ fun PPGWaveformCanvas(
         // Draw the main PPG trace
         drawPath(
             path = path,
-            color = MedicalGreen,
+            color = traceColor,
             style = Stroke(
                 width = 2.5.dp.toPx(),
                 cap = androidx.compose.ui.graphics.StrokeCap.Round,
                 join = androidx.compose.ui.graphics.StrokeJoin.Round
             )
         )
-        
+
         // Add a "glow" effect to the trace for a CRT/Monitor feel
         drawPath(
             path = path,
-            color = MedicalGreen.copy(alpha = 0.3f),
+            color = traceColor.copy(alpha = 0.3f),
             style = Stroke(width = 6.dp.toPx())
         )
     }

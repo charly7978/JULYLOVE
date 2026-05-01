@@ -3,9 +3,10 @@ package com.julylove.medical.signal
 import kotlin.math.sqrt
 
 /**
- * Spo2Estimator: Ratio-of-Ratios (RoR) implementation for PPG SpO2 estimation.
- * Formula: R = (AC_red / DC_red) / (AC_green / DC_green)
- * SpO2 = A - B * R
+ * Spo2Estimator: Ratio-of-Ratios (RoR) sobre pulsos AC/DC en canal rojo vs verde.
+ * R ≈ (ACr/Dcr)/(ACg/Dcg); SpO2 ≈ a − b·R con (a,b) calibración por cohorte/dispositivo.
+ * Limitaciones: sin LED IR dedicado como pulsioximetría clínica → MAEs mayores; estudios DL reportan órdenes ~5% MAE.
+ * QC: coeficientes de variación alto o SQI bajo ⇒ no exponer número (valor 0 y estado cualitativo).
  */
 class Spo2Estimator {
 
@@ -58,8 +59,19 @@ class Spo2Estimator {
         }
 
         val rRatio = (redAc / redDc) / (greenAc / greenDc)
+
+        val redCv = coefficientOfVariation(redBuffer)
+        val greenCv = coefficientOfVariation(greenBuffer)
+        if (rRatio.isNaN() || rRatio.isInfinite() || redCv > 0.22f || greenCv > 0.22f) {
+            return Spo2Result(0f, sqi.toDouble(), "SEÑAL_INESTABLE")
+        }
+
         val spo2 = (activeProfile.a - activeProfile.b * rRatio).toFloat().coerceIn(70f, 100f)
-        
+
+        if (sqi < 0.55f) {
+            return Spo2Result(0f, sqi.toDouble(), "QC: SEÑAL DÉBIL")
+        }
+
         val status = when {
             spo2 < 90f -> "HIPOXIA CRÍTICA"
             spo2 < 94f -> "HIPOXIA LEVE"
@@ -76,5 +88,16 @@ class Spo2Estimator {
 
     fun setProfile(profile: CalibrationProfile) {
         activeProfile = profile
+    }
+
+    private fun coefficientOfVariation(buf: List<Float>): Float {
+        if (buf.size < 8) return 1f
+        val mean = buf.average().toFloat().coerceAtLeast(1e-3f)
+        var s = 0f
+        for (v in buf) {
+            val d = v - mean
+            s += d * d
+        }
+        return sqrt(s / buf.size) / mean
     }
 }

@@ -4,6 +4,8 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.View
 import android.view.WindowInsets
 import android.view.WindowInsetsController
@@ -29,6 +31,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import com.julylove.medical.camera.AmbientLightMonitor
 import com.julylove.medical.camera.Camera2PpgController
 import com.julylove.medical.signal.PpgValidityState
 import com.julylove.medical.signal.RhythmAnalysisEngine
@@ -39,6 +42,16 @@ class MainActivity : ComponentActivity() {
 
     private lateinit var cameraController: Camera2PpgController
     private lateinit var viewModel: MonitorViewModel
+    private val ambientMonitor = AmbientLightMonitor(this)
+    private val luxHandler = Handler(Looper.getMainLooper())
+    private val luxTicker = object : Runnable {
+        override fun run() {
+            if (::cameraController.isInitialized) {
+                cameraController.notifyAmbientLux(ambientMonitor.lux)
+            }
+            luxHandler.postDelayed(this, 500L)
+        }
+    }
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -77,6 +90,18 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        ambientMonitor.start()
+        luxHandler.post(luxTicker)
+    }
+
+    override fun onPause() {
+        luxHandler.removeCallbacks(luxTicker)
+        ambientMonitor.stop()
+        super.onPause()
+    }
+
     private fun hideSystemUI() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
         val controller = WindowInsetsControllerCompat(window, window.decorView)
@@ -98,6 +123,7 @@ fun FullScreenMonitor(viewModel: MonitorViewModel) {
         PPGWaveformCanvas(
             samples = state.ppgSamples,
             isMeasuring = state.isMeasuring,
+            rhythmStatus = state.rhythmStatus,
             modifier = Modifier.fillMaxSize()
         )
 
@@ -194,6 +220,11 @@ fun FullScreenMonitor(viewModel: MonitorViewModel) {
                     TechnicalValue("RMSSD", "${"%.1f".format(state.technicalData.rmssd)} ms")
                     TechnicalValue("pNN50", "${"%.1f".format(state.technicalData.pnn50)}%")
                     TechnicalValue("COEF_VAR", "${"%.1f".format(state.technicalData.cv)}%")
+                    TechnicalValue("H_SHANNON", "${"%.2f".format(state.technicalData.shannonEntropyBits)} bit")
+                    TechnicalValue(
+                        "SAMPEN",
+                        state.technicalData.sampleEntropy?.let { "%.3f".format(it) } ?: "—"
+                    )
                     TechnicalValue("INDICE_MOV", "${"%.3f".format(state.technicalData.motionIntensity)}")
                     TechnicalValue("FPS_MUESTREO", "${state.technicalData.fps}")
                     
@@ -306,7 +337,7 @@ fun StatusBadge(status: RhythmAnalysisEngine.RhythmStatus) {
     val (color, text) = when(status) {
         RhythmAnalysisEngine.RhythmStatus.REGULAR -> MedicalGreen to "RITMO REGULAR"
         RhythmAnalysisEngine.RhythmStatus.IRREGULAR -> MedicalAmber to "RITMO IRREGULAR"
-        RhythmAnalysisEngine.RhythmStatus.SUSPECTED_ARRHYTHMIA -> MedicalRed to "SOSPECHA DE ARRITMIA"
+        RhythmAnalysisEngine.RhythmStatus.SUSPECTED_ARRHYTHMIA -> MedicalRed to "ARRITMIA DETECTADA"
         RhythmAnalysisEngine.RhythmStatus.CALIBRATING -> MedicalTextGray to "CALIBRANDO"
     }
     
