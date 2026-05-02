@@ -81,8 +81,12 @@ function draw(canvas: HTMLCanvasElement, samples: PpgSample[], beats: BeatEvent[
   const tStart = tEnd - windowSeconds * 1000
   let mn = Number.POSITIVE_INFINITY
   let mx = Number.NEGATIVE_INFINITY
+  let validCount = 0
+  let invalidCount = 0
   for (const s of samples) {
     if (s.timestampMs < tStart) continue
+    if (s.valid) validCount++
+    else invalidCount++
     if (s.display < mn) mn = s.display
     if (s.display > mx) mx = s.display
   }
@@ -90,10 +94,11 @@ function draw(canvas: HTMLCanvasElement, samples: PpgSample[], beats: BeatEvent[
     mn -= 1
     mx += 1
   }
-  const pad = (mx - mn) * 0.2
+  const pad = (mx - mn) * 0.22
   mn -= pad
   mx += pad
   const span = Math.max(1, tEnd - tStart)
+  const mostlyInvalid = invalidCount > validCount
 
   // Marcadores de latido: línea vertical + anillo en el pico.
   for (const b of beats) {
@@ -122,33 +127,33 @@ function draw(canvas: HTMLCanvasElement, samples: PpgSample[], beats: BeatEvent[
 
   // Glow externo
   ctx.save()
-  ctx.strokeStyle = 'rgba(45, 255, 170, 0.22)'
-  ctx.lineWidth = 14
+  ctx.strokeStyle = mostlyInvalid ? 'rgba(120, 140, 160, 0.12)' : 'rgba(45, 255, 170, 0.24)'
+  ctx.lineWidth = mostlyInvalid ? 8 : 14
   ctx.lineJoin = 'round'
   ctx.lineCap = 'round'
   strokePath(ctx, samples, tStart, span, mn, mx, w, h)
 
   // Trazo principal
-  ctx.strokeStyle = 'rgba(75, 255, 195, 1)'
-  ctx.lineWidth = 3.2
+  ctx.strokeStyle = mostlyInvalid ? 'rgba(140, 160, 180, 0.85)' : 'rgba(75, 255, 195, 1)'
+  ctx.lineWidth = mostlyInvalid ? 2.2 : 3.2
   strokePath(ctx, samples, tStart, span, mn, mx, w, h)
 
   // Línea interior luminosa
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.9)'
-  ctx.lineWidth = 1.2
+  ctx.strokeStyle = mostlyInvalid ? 'rgba(255, 255, 255, 0.45)' : 'rgba(255, 255, 255, 0.9)'
+  ctx.lineWidth = mostlyInvalid ? 0.8 : 1.2
   strokePath(ctx, samples, tStart, span, mn, mx, w, h)
   ctx.restore()
 
   // Cabezote del barrido (punto brillante en el extremo)
   const lastX = ((last.timestampMs - tStart) / span) * w
   const lastY = h - ((last.display - mn) / (mx - mn)) * h
-  ctx.fillStyle = 'rgba(200, 255, 220, 1)'
+  ctx.fillStyle = mostlyInvalid ? 'rgba(180, 190, 205, 0.8)' : 'rgba(200, 255, 220, 1)'
   ctx.beginPath()
-  ctx.arc(lastX, lastY, 4, 0, Math.PI * 2)
+  ctx.arc(lastX, lastY, mostlyInvalid ? 2.4 : 4, 0, Math.PI * 2)
   ctx.fill()
-  ctx.fillStyle = 'rgba(34, 255, 170, 0.35)'
+  ctx.fillStyle = mostlyInvalid ? 'rgba(120, 140, 160, 0.2)' : 'rgba(34, 255, 170, 0.35)'
   ctx.beginPath()
-  ctx.arc(lastX, lastY, 10, 0, Math.PI * 2)
+  ctx.arc(lastX, lastY, mostlyInvalid ? 6 : 10, 0, Math.PI * 2)
   ctx.fill()
 }
 

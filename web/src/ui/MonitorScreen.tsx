@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { MonitorApi } from '../hooks/useMonitor'
-import { MEASUREMENT_STATE_LABEL, stateAllowsMetrics, HYPERTENSION_LABEL } from '../ppg/types'
+import { MEASUREMENT_STATE_LABEL, stateAllowsMetrics } from '../ppg/types'
 import { SignalQualityIndex, SQI_BAND_LABEL } from '../ppg/sqi'
 import { CalibrationOverlay } from './CalibrationOverlay'
 import { PpgWaveform } from './PpgWaveform'
@@ -16,15 +16,12 @@ export function MonitorScreen({ monitor }: { monitor: MonitorApi }) {
   const [showCalibration, setShowCalibration] = useState(false)
   const r = monitor.reading
   const measuring = stateAllowsMetrics(r.state)
-  const bpm = r.bpm !== null && measuring ? r.bpm.toFixed(0) : '--'
-  const spo2 = r.spo2 !== null && measuring ? r.spo2.toFixed(1) : '--'
-  const rr = r.rrMs !== null && measuring ? r.rrMs.toFixed(0) : '--'
+  const bpm = r.bpm.toFixed(0)
+  const spo2 = r.spo2.toFixed(1)
+  const rr = r.rrMs.toFixed(0)
   // `monitor.tick` fuerza la reevaluación cuando cambian los refs.
   void monitor.tick
-  const showWave =
-    monitor.running &&
-    (r.state === 'WARMUP' || measuring) &&
-    monitor.samplesRef.current.length > 1
+  const showWave = monitor.running && r.state !== 'NO_CONTACT' && monitor.samplesRef.current.length > 1
   const stateColor = colorOfState(r.state)
   const sqiBand = new SignalQualityIndex().band(r.sqi)
   const sqiColor =
@@ -35,15 +32,17 @@ export function MonitorScreen({ monitor }: { monitor: MonitorApi }) {
       : sqiBand === 'DEGRADED'
       ? '#FFAA22'
       : '#FF3344'
-  const spo2Label =
-    r.spo2 !== null
-      ? monitor.calibration
-        ? 'clínico'
-        : 'provisional'
-      : r.state === 'MEASURING'
-      ? 'req. datos'
-      : '—'
-  const risk = r.hypertensionRisk
+  const spo2Label = measuring ? (monitor.calibration ? 'clínico' : 'provisional') : 'NO_VALID_PPG'
+  const riskLabel =
+    r.hypertensionRisk === 'NO_VALID_PPG'
+      ? 'NO_VALID_PPG'
+      : r.hypertensionRisk === 'HYPERTENSIVE_PATTERN'
+        ? 'PATRÓN HIPERTENSIVO'
+        : r.hypertensionRisk === 'BORDERLINE'
+          ? 'LIMÍTROFE'
+          : r.hypertensionRisk === 'NORMOTENSE'
+            ? 'NORMOTENSO'
+            : 'INDETERMINADO'
 
   useEffect(() => {
     if (!monitor.running) return
@@ -91,12 +90,12 @@ export function MonitorScreen({ monitor }: { monitor: MonitorApi }) {
           <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
             <div
               style={{
-                color: r.bpm !== null ? '#22FFAA' : '#556677',
+                color: measuring ? '#22FFAA' : '#556677',
                 fontSize: 'clamp(56px, 14vw, 140px)',
                 fontWeight: 900,
                 lineHeight: 0.95,
                 letterSpacing: 1,
-                textShadow: r.bpm !== null ? '0 0 14px rgba(34,255,170,0.55)' : 'none'
+                textShadow: measuring ? '0 0 14px rgba(34,255,170,0.55)' : 'none'
               }}
             >
               {bpm}
@@ -105,7 +104,7 @@ export function MonitorScreen({ monitor }: { monitor: MonitorApi }) {
               lpm
             </div>
           </div>
-          {r.bpm !== null ? (
+          {measuring ? (
             <div style={{ color: '#66ccaa', fontSize: 11 }}>
               confianza {(r.bpmConfidence * 100).toFixed(0)}% · {r.beatsDetected} latidos
             </div>
@@ -118,7 +117,7 @@ export function MonitorScreen({ monitor }: { monitor: MonitorApi }) {
           <div style={{ display: 'flex', alignItems: 'baseline', gap: 4 }}>
             <div
               style={{
-                color: r.spo2 !== null ? (monitor.calibration ? '#22FFAA' : '#FFDD55') : '#556677',
+                color: measuring ? (monitor.calibration ? '#22FFAA' : '#FFDD55') : '#556677',
                 fontSize: 'clamp(30px, 8vw, 64px)',
                 fontWeight: 900,
                 lineHeight: 0.95
@@ -137,7 +136,7 @@ export function MonitorScreen({ monitor }: { monitor: MonitorApi }) {
           <Stat label="PI" value={measuring ? r.perfusionIndex.toFixed(2) : '--'} unit="%" color="#AACCEE" />
           <Stat
             label="SDNN"
-            value={r.rrSdnnMs !== null ? r.rrSdnnMs.toFixed(0) : '--'}
+            value={measuring ? r.rrSdnnMs.toFixed(0) : '0'}
             unit="ms"
             color="#88ccdd"
           />
@@ -149,13 +148,13 @@ export function MonitorScreen({ monitor }: { monitor: MonitorApi }) {
           <Stat label="MOV." value={r.motionScore.toFixed(2)} color="#AACCEE" />
           <Stat
             label="CRIBADO"
-            value={risk ? HYPERTENSION_LABEL[risk].label : '—'}
+            value={riskLabel}
             color={
-              risk === 'HYPERTENSIVE_PATTERN'
+              r.hypertensionRisk === 'HYPERTENSIVE_PATTERN'
                 ? '#FF3344'
-                : risk === 'BORDERLINE'
+                : r.hypertensionRisk === 'BORDERLINE'
                 ? '#FFAA22'
-                : risk === 'NORMOTENSE'
+                : r.hypertensionRisk === 'NORMOTENSE'
                 ? '#22FFAA'
                 : '#88ccdd'
             }
@@ -175,7 +174,12 @@ export function MonitorScreen({ monitor }: { monitor: MonitorApi }) {
         </div>
 
         {/* Mensaje clínico */}
-        <div style={clinicalMsg}>{r.message}</div>
+        <div style={clinicalMsg}>
+          {r.message}
+          <span style={{ marginLeft: 8, color: '#77aabb' }}>
+            [{r.reasonCodes.slice(0, 4).join(' · ') || 'SIN_CODIGOS'}]
+          </span>
+        </div>
       </div>
 
       {/* Controles al pie */}
@@ -240,11 +244,8 @@ function Stat({
 
 function colorOfState(state: string): string {
   switch (state) {
-    case 'MEASURING': return '#22FFAA'
-    case 'WARMUP': return '#FFDD22'
-    case 'DEGRADED':
-    case 'CONTACT_PARTIAL':
-    case 'CALIBRATION_REQUIRED': return '#FFAA22'
+    case 'VALID_LIVE_PPG': return '#22FFAA'
+    case 'PROBABLE_PPG': return '#FFAA22'
     case 'NO_CONTACT': return '#8899AA'
     default: return '#FF3344'
   }

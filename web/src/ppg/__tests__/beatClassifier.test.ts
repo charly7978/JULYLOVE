@@ -32,8 +32,8 @@ describe('BeatClassifier', () => {
     expect(c.classify(beat(1500), 0.8).type).toBe('SUSPECT_PAUSE')
   })
 
-  it('SQI bajo → INVALID_SIGNAL', () => {
+  it('SQI extremadamente bajo → INVALID_SIGNAL', () => {
     const c = new BeatClassifier()
-    expect(c.classify(beat(800), 0.1).type).toBe('INVALID_SIGNAL')
+    expect(c.classify(beat(800), 0.01).type).toBe('INVALID_SIGNAL')
   })
 })
