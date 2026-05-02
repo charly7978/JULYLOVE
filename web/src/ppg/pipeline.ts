@@ -2,7 +2,7 @@ import { ArrhythmiaScreening, type ArrhythmiaSummary } from './arrhythmia'
 import { BeatClassifier } from './beatClassifier'
 import { FingerContactDetector } from './contact'
 import { HeartRateFusion } from './fusion'
-import { PeakDetectorRobust } from './peakRobust'
+import { PeakDetectorSsf } from './peakSsf'
 import { PpgPreprocessor } from './preprocessor'
 import { SignalQualityIndex } from './sqi'
 import { SpectralHeartRateEstimator } from './spectral'
@@ -76,7 +76,7 @@ export class PpgPipeline {
   private readonly preGreen: PpgPreprocessor
   private readonly spo2: Spo2Estimator
   private readonly spectral: SpectralHeartRateEstimator
-  private readonly detector: PeakDetectorRobust
+  private readonly detector: PeakDetectorSsf
   private readonly classifier: BeatClassifier
   private readonly screening: ArrhythmiaScreening
   private readonly sqi: SignalQualityIndex
@@ -103,7 +103,7 @@ export class PpgPipeline {
     this.preGreen = new PpgPreprocessor(fsNominal, 0.5, 4.0)
     this.spo2 = new Spo2Estimator(fsNominal)
     this.spectral = new SpectralHeartRateEstimator(fsNominal, { windowSeconds: 8 })
-    this.detector = new PeakDetectorRobust(fsNominal, { integWindowMs: 150, refractoryMs: 260 })
+    this.detector = new PeakDetectorSsf(fsNominal, { ssfWindowMs: 125, refractoryMs: 280, searchWindowMs: 240 })
     this.classifier = new BeatClassifier()
     this.screening = new ArrhythmiaScreening()
     this.sqi = new SignalQualityIndex()
@@ -203,43 +203,15 @@ export class PpgPipeline {
 
     let beat: BeatEvent | null = null
     if (stateAllowsMetrics(contactDecision.state)) {
+      // El detector SSF ya valida rango fisiológico, coherencia y amplitud
+      // internamente, así que aquí sólo aplicamos SQI mínimo.
       const d = this.detector.feed(chosenFiltered, frame.timestampMs, chosenPolarity)
       if (d) {
         const prev = this.lastBeatTsMs
         const rr = prev !== null ? d.timestampMs - prev : null
         const bpmInstant = rr !== null && rr > 0 ? 60000 / rr : null
-
-        // ═══════════════════════════════════════════════════════════════════
-        //  GATE FISIOLÓGICO DE RR — rechaza detecciones por ruido.
-        // ═══════════════════════════════════════════════════════════════════
-        //  1. Rango absoluto: 300 ms ≤ RR ≤ 1600 ms  (37 ≤ BPM ≤ 200).
-        //  2. Coherencia con mediana histórica: ±40 %.
-        //  3. Si el latido cae por coherencia, NO se cuenta y NO avanza
-        //     lastBeatTsMs — el siguiente candidato mide RR desde el
-        //     último latido VÁLIDO. Así un pico falso no genera una
-        //     cascada de RR absurdos.
-        let accept = true
-        let rejectReason = ''
-        if (rr !== null) {
-          if (rr < 300 || rr > 1600) {
-            accept = false
-            rejectReason = 'rr_fuera_rango_fisiologico'
-          } else {
-            const medianRr = this.classifier.medianRr()
-            if (medianRr !== null && Math.abs(rr - medianRr) / medianRr > 0.4) {
-              accept = false
-              rejectReason = 'rr_incoherente_con_mediana'
-            }
-          }
-        }
         const sqiQuick = this.estimateSqiQuick(chosenPi, motionScore, frame.clipHighRatio)
-        if (!accept) {
-          // No actualizamos lastBeatTsMs para que el próximo candidato
-          // se compare contra el último latido ACEPTADO.
-        } else if (sqiQuick < 0.15) {
-          // Señal demasiado sucia: rechazar sin contar.
-          rejectReason = 'sqi_muy_bajo'
-        } else {
+        if (sqiQuick >= 0.15) {
           const raw: BeatEvent = {
             timestampMs: d.timestampMs,
             amplitude: d.amplitude,
@@ -257,9 +229,6 @@ export class PpgPipeline {
             if (classified.type !== 'NORMAL') this.abnormalBeats++
             beat = classified
           }
-        }
-        if (rejectReason) {
-          // Silencioso: el detector descarta sin romper el flujo.
         }
       }
     }

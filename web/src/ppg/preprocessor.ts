@@ -1,31 +1,40 @@
-import { BandpassFilter, Biquad, Detrender } from './filters'
+import { BandpassFilter, Biquad } from './filters'
 
 export interface PreprocessorOutput {
-  /** Solo DC removido: morfología PPG natural, para dibujar. */
+  /** Solo DC removido (HP 0.4 Hz): morfología PPG natural, para dibujar. */
   detrended: number
   /** Banda 0.5-4 Hz: óptimo para detección de picos. */
   filtered: number
-  /** Señal morfológica suavizada (detrended + LP 2.5 Hz): ideal para pantalla. */
+  /** Señal morfológica suavizada (detrended + LP 3 Hz): ideal para pantalla. */
   display: number
   dc: number
   ac: number
   perfusionIndex: number
+  /** True si el frame es un artefacto (cambio abrupto del flash o dedo). */
+  artifact: boolean
 }
 
 /**
- * Preprocesamiento de canal PPG:
- *  1. Detrender por media móvil (ventana ~4 s).
- *  2. Bandpass Butterworth orden 4 (0.5-4 Hz).
- *  3. Seguidor de DC por EMA lento (~2 s).
- *  4. AC = peak-to-peak de la señal filtrada sobre ventana corta (~2 s).
- *  5. Perfusion index = 100 * AC / DC (%).
+ * Preprocesamiento de canal PPG de alta robustez.
  *
- * AC se calcula cada muestra recorriendo el buffer circular chico (2 s x fs).
- * No es caro (≈60 comparaciones por frame) y garantiza que `perfusionIndex`
- * no quede a 0 mientras el buffer se llena.
+ *  1. Seguidor DC exponencial (EMA con τ≈2 s).
+ *  2. Detection de ARTEFACTOS: si |raw − DC| / DC > 15 %, el frame se
+ *     declara artefacto y el bandpass NO se alimenta con ese valor (usa el
+ *     DC como sustituto). Esto evita que cambios abruptos de iluminación
+ *     del flash o del dedo desastabilicen los filtros IIR durante varios
+ *     segundos.
+ *  3. Detrend por high-pass Butterworth de 0.4 Hz (NO por media móvil,
+ *     cuya respuesta a escalones es un step gigante que tarda ~N samples
+ *     en desaparecer y se ve como un spike enorme en pantalla).
+ *  4. Bandpass Butterworth 0.5–4 Hz sobre la señal detrended para el
+ *     detector de picos.
+ *  5. LP Butterworth 3 Hz sobre la señal detrended para la visualización:
+ *     morfología PPG natural (subida sistólica rápida + bajada lenta).
+ *  6. AC peak-to-peak en ventana 2 s + PI = 100·AC/DC.
  */
 export class PpgPreprocessor {
-  private readonly detrender: Detrender
+  private readonly hp1: Biquad
+  private readonly hp2: Biquad
   private readonly band: BandpassFilter
   private readonly displayLp1: Biquad
   private readonly displayLp2: Biquad
@@ -38,16 +47,17 @@ export class PpgPreprocessor {
 
   constructor(sampleRate: number, lowHz = 0.5, highHz = 4.0) {
     this.sampleRate = sampleRate
-    this.detrender = new Detrender(Math.max(30, Math.floor(sampleRate * 4)))
+    this.hp1 = Biquad.highPass(0.4, sampleRate, Math.SQRT1_2)
+    this.hp2 = Biquad.highPass(0.4, sampleRate, Math.SQRT1_2)
     this.band = new BandpassFilter(sampleRate, lowHz, highHz)
-    // LP display ≈ 3 Hz con Q de Butterworth orden 4 en cascada (2 biquads).
-    this.displayLp1 = Biquad.lowPass(3.5, sampleRate, Math.SQRT1_2)
-    this.displayLp2 = Biquad.lowPass(3.5, sampleRate, Math.SQRT1_2)
+    this.displayLp1 = Biquad.lowPass(3.0, sampleRate, Math.SQRT1_2)
+    this.displayLp2 = Biquad.lowPass(3.0, sampleRate, Math.SQRT1_2)
     this.acBuffer = new Float64Array(Math.max(30, Math.floor(sampleRate * 2)))
   }
 
   reset(): void {
-    this.detrender.reset()
+    this.hp1.reset()
+    this.hp2.reset()
     this.band.reset()
     this.displayLp1.reset()
     this.displayLp2.reset()
@@ -62,20 +72,27 @@ export class PpgPreprocessor {
     if (!this.initialized) {
       this.dcEma = rawSample
       this.initialized = true
-    } else {
-      const alpha = 1 / (this.sampleRate * 2)
-      this.dcEma += alpha * (rawSample - this.dcEma)
     }
-    const detrended = this.detrender.process(rawSample)
-    const filtered = this.band.process(detrended)
-    const display = this.displayLp2.process(this.displayLp1.process(detrended))
+    // Artefacto: salto > 15 % respecto al DC actual.
+    const dev = Math.abs(rawSample - this.dcEma) / Math.max(1, this.dcEma)
+    const artifact = dev > 0.15
+    // DC sigue al valor estable (EMA). En un artefacto, el DC sigue
+    // lentamente para no contaminarse.
+    const alpha = artifact ? 1 / (this.sampleRate * 6) : 1 / (this.sampleRate * 2)
+    this.dcEma += alpha * (rawSample - this.dcEma)
+
+    // Para los filtros usamos el rawSample si no es artefacto; si lo es,
+    // sustituimos por el DC (equivalente a "no novedad", mantiene los IIR
+    // sin excitar).
+    const clean = artifact ? this.dcEma : rawSample
+    const hp = this.hp2.process(this.hp1.process(clean))
+    const filtered = this.band.process(hp)
+    const display = this.displayLp2.process(this.displayLp1.process(hp))
 
     this.acBuffer[this.acIndex] = filtered
     this.acIndex = (this.acIndex + 1) % this.acBuffer.length
     if (this.acFilled < this.acBuffer.length) this.acFilled++
 
-    // AC peak-to-peak sobre el buffer realmente lleno. Coste O(N) por muestra
-    // pero N es ≤ 60 en 30 Hz; costo despreciable.
     let mx = Number.NEGATIVE_INFINITY
     let mn = Number.POSITIVE_INFINITY
     for (let i = 0; i < this.acFilled; i++) {
@@ -86,6 +103,7 @@ export class PpgPreprocessor {
     const ac = Number.isFinite(mx) && Number.isFinite(mn) ? Math.max(0, mx - mn) : 0
     const dc = Math.max(1, this.dcEma)
     const pi = Math.min(50, Math.max(0, (100 * ac) / dc))
-    return { detrended, filtered, display, dc, ac, perfusionIndex: pi }
+
+    return { detrended: hp, filtered, display, dc, ac, perfusionIndex: pi, artifact }
   }
 }

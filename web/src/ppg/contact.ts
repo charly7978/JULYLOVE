@@ -57,7 +57,7 @@ export class FingerContactDetector {
   }) {
     this.warmupMs = opts?.warmupMs ?? 1500 // antes 2500; baja el tiempo a primer latido
     this.enterStreak = opts?.enterStreak ?? 5 // ~170 ms a 30 Hz
-    this.exitStreak = opts?.exitStreak ?? 25 // ~830 ms a 30 Hz — muy costoso salir
+    this.exitStreak = opts?.exitStreak ?? 90 // ~3 s sostenidos para salir — absorbe glitches largos
 
     this.enterMinR = 70
     this.enterMaxR = 252
@@ -116,9 +116,20 @@ export class FingerContactDetector {
     if (motionScore > 0.7) flags |= VALIDITY.MOTION_HIGH
     if (fps > 1 && fps < 12) flags |= VALIDITY.LOW_FPS
 
+    // Override anti-microcorte: si ya estamos en contacto y el frame trae
+    // CUALQUIER evidencia de dedo (pixel rojo significativo + cobertura
+    // mínima), consideramos que el dedo no se fue, sólo hubo una variación
+    // óptica. badStreak no crece; okStreak tampoco cae tan rápido.
+    const minimalEvidence =
+      frame.redMean >= 35 && frame.roiCoverage >= 0.1 && rgRatio >= 0.95
+
     if (solid) {
       this.okStreak = Math.min(this.enterStreak * 8, this.okStreak + 1)
-      this.badStreak = Math.max(0, this.badStreak - 2) // recuperación rápida
+      this.badStreak = Math.max(0, this.badStreak - 3) // recuperación rápida
+    } else if (inContact && minimalEvidence) {
+      // Dedo probablemente sigue ahí; sólo hay variación óptica.
+      this.okStreak = Math.max(0, this.okStreak - 1)
+      this.badStreak = Math.max(0, this.badStreak - 0) // no crece
     } else {
       this.okStreak = Math.max(0, this.okStreak - 1)
       this.badStreak = Math.min(this.exitStreak * 3, this.badStreak + 1)

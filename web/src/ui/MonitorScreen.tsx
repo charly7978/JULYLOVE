@@ -19,6 +19,8 @@ export function MonitorScreen({ monitor }: { monitor: MonitorApi }) {
   const bpm = r.bpm !== null && measuring ? r.bpm.toFixed(0) : '--'
   const spo2 = r.spo2 !== null && measuring ? r.spo2.toFixed(1) : '--'
   const rr = r.rrMs !== null && measuring ? r.rrMs.toFixed(0) : '--'
+  // `monitor.tick` fuerza la reevaluación cuando cambian los refs.
+  void monitor.tick
   const showWave =
     monitor.running &&
     (r.state === 'WARMUP' || measuring) &&

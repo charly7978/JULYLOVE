@@ -108,11 +108,11 @@ export function useMonitor(): MonitorApi {
             lastRatioRef.current = step.spo2Debug.ratioOfRatios
           }
 
-          if (step.sample === null) {
-            // Sin contacto: limpiamos onda y latidos (no queremos residuos).
+          if (step.sample === null && step.reading.state === 'NO_CONTACT') {
+            // Sin contacto real: limpiamos onda y latidos (no queremos residuos).
             if (samplesRef.current.length !== 0) samplesRef.current = []
             if (beatsRef.current.length !== 0) beatsRef.current = []
-          } else {
+          } else if (step.sample !== null) {
             samplesRef.current.push(step.sample)
             if (samplesRef.current.length > SAMPLE_BUFFER_LIMIT) {
               samplesRef.current.splice(0, samplesRef.current.length - SAMPLE_BUFFER_LIMIT)
