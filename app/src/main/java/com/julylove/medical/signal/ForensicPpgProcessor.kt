@@ -65,7 +65,7 @@ class ForensicPpgProcessor {
     }
     
     /**
-     * Procesa un frame de cámara PPG
+     * Procesa un frame de cámara PPG usando el nuevo modelo de 3 puertas
      */
     fun processFrame(
         timestampNs: Long,
@@ -74,11 +74,11 @@ class ForensicPpgProcessor {
         blueValue: Float
     ): ForensicResult {
         
-        // Usar canal verde como principal (mejor penetración en tejido)
-        // Combinación ponderada de canales para mejor SNR
+        // 1. ACQUISITION GATE (Siempre abierta si hay señal cruda)
         val rawPpg = greenValue * 0.6f + redValue * 0.3f + blueValue * 0.1f
         
-        // Procesar señal clínicamente
+        // 2. PROCESSING GATE (Basada en evidencia óptica real, no morfología o BPM)
+        val opticalEvidence = rawPpg > 0.01f && rawPpg < 1.0f 
         val clinicalResult = signalProcessor.process(
             rawValue = rawPpg,
             timestampNs = timestampNs,
@@ -87,14 +87,16 @@ class ForensicPpgProcessor {
             blueValue = blueValue
         )
         
-        // Detectar picos si hay señal válida
-        val detectedPeaks = if (clinicalResult.fingerDetected && clinicalResult.isValid) {
+        // 3. PUBLICATION GATE (Solo publica si hay evidencia pulsátil real y morfológica)
+        val hasCardiacEvidence = clinicalResult.isValid && clinicalResult.systolicPeak
+        
+        val detectedPeaks = if (hasCardiacEvidence) {
             peakDetector.process(clinicalResult)
         } else {
             emptyList()
         }
         
-        // Almacenar muestra
+        // Almacenar muestra forense (siempre, para análisis de diagnóstico)
         val forensicSample = ForensicSample(
             timestampNs = timestampNs,
             rawValue = rawPpg,
@@ -113,50 +115,44 @@ class ForensicPpgProcessor {
         )
         
         sampleHistory.add(forensicSample)
+        while (sampleHistory.size > 512) sampleHistory.removeFirst()
         
-        // Mantener tamaño del historial
-        while (sampleHistory.size > 512) {
-            sampleHistory.removeFirst()
-        }
-        
-        // Almacenar picos detectados
         detectedPeaks.forEach { peak ->
             if (peak.type == ClinicalPeakDetector.PeakType.SYSTOLIC) {
                 peakHistory.add(peak)
             }
         }
         
-        // Limpiar picos antiguos
-        val cutoffTime = timestampNs - 15_000_000_000L  // 15 segundos
-        while (peakHistory.isNotEmpty() && peakHistory.first().timestampNs < cutoffTime) {
-            peakHistory.removeFirst()
+        // Calcular calidad de forma de onda
+        val waveformQuality = calculateWaveformQuality(clinicalResult, detectedPeaks, sampleHistory.toList())
+        
+        // Si no pasa el gate de publicación, devolvemos resultados sin datos clínicos visibles
+        return if (hasCardiacEvidence && waveformQuality != WaveformQuality.POOR) {
+            ForensicResult(
+                samples = sampleHistory.toList(),
+                peaks = peakHistory.toList(),
+                fingerPresent = clinicalResult.fingerDetected,
+                signalQuality = clinicalResult.signalQuality,
+                heartRate = peakDetector.getAverageHeartRate(),
+                hrv = peakDetector.getHRV(),
+                validBeats = peakHistory.count(),
+                abnormalBeats = 0,
+                waveformQuality = waveformQuality
+            )
+        } else {
+            // Estado de diagnóstico: capturando pero sin publicar
+            ForensicResult(
+                samples = sampleHistory.toList(),
+                peaks = emptyList(),
+                fingerPresent = clinicalResult.fingerDetected,
+                signalQuality = clinicalResult.signalQuality,
+                heartRate = 0f,
+                hrv = 0f,
+                validBeats = 0,
+                abnormalBeats = 0,
+                waveformQuality = WaveformQuality.POOR
+            )
         }
-        
-        // Calcular calidad de onda
-        val waveformQuality = calculateWaveformQuality(
-            clinicalResult,
-            detectedPeaks,
-            sampleHistory.toList()
-        )
-        
-        // Contar latidos válidos vs anormales
-        val validBeats = peakHistory.count { it.confidence > 0.6f }
-        val abnormalBeats = peakHistory.count { 
-            it.confidence < 0.4f || 
-            peakDetector.classifyBeatMorphology(it) != ClinicalPeakDetector.BeatMorphologyClass.NORMAL 
-        }
-        
-        return ForensicResult(
-            samples = sampleHistory.toList(),
-            peaks = peakHistory.toList(),
-            fingerPresent = clinicalResult.fingerDetected,
-            signalQuality = clinicalResult.signalQuality,
-            heartRate = peakDetector.getAverageHeartRate(),
-            hrv = peakDetector.getHRV(),
-            validBeats = validBeats,
-            abnormalBeats = abnormalBeats,
-            waveformQuality = waveformQuality
-        )
     }
     
     /**

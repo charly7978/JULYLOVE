@@ -48,25 +48,12 @@ class ClinicalSignalProcessor {
         // Calcular índice de perfusión
         perfusionIndex = if (dcValue > 0) abs(acValue) / dcValue else 0f
         
-        // Verificar si hay presencia real de dedo
-        val fingerPresent = detectFingerPresence(rawValue, redValue, greenValue, blueValue)
+        // Eliminamos el Gating: Procesar siempre la señal cruda forense.
+        val fingerPresent = true 
         
-        if (!fingerPresent) {
-            return ClinicalResult(
-                timestampNs = timestampNs,
-                isValid = false,
-                fingerDetected = false,
-                dcComponent = dcValue,
-                acComponent = 0f,
-                filteredValue = 0f,
-                perfusionIndex = 0f,
-                signalQuality = 0f,
-                systolicPeak = false,
-                dicroticNotch = false,
-                diastolicPeak = false,
-                valley = false
-            )
-        }
+        // Eliminamos el bloqueador por presencia
+        val fingerValid = true
+
         
         // Filtrado
         val bandpassed = bandpassFilter.filter(acValue)
@@ -97,36 +84,9 @@ class ClinicalSignalProcessor {
             peakConfidence = features.confidence
         )
     }
+
     
-    private fun detectFingerPresence(
-        rawValue: Float,
-        red: Float,
-        green: Float,
-        blue: Float
-    ): Boolean {
-        if (rawValue > 250f || rawValue < 5f) return false
-        
-        val totalIntensity = red + green + blue
-        if (totalIntensity < 1f) return false
-        
-        val redRatio = red / totalIntensity
-        val greenRatio = green / totalIntensity
-        val blueRatio = blue / totalIntensity
-        
-        if (greenRatio > redRatio * 1.2f || blueRatio > redRatio * 1.3f) return false
-        if (perfusionIndex < 0.005f) return false
-        
-        if (rawBuffer.size >= 30) {
-            val recent = rawBuffer.toList().takeLast(30)
-            val mean = recent.average()
-            val variance = recent.map { (it - mean).pow(2) }.average()
-            val cv = sqrt(variance) / mean
-            if (cv < 0.001 || cv > 0.3) return false
-        }
-        
-        return true
-    }
-    
+
     private fun detectFiducialPoints(): FiducialFeatures {
         val data = filteredBuffer.toList()
         if (data.size < 3) return FiducialFeatures()

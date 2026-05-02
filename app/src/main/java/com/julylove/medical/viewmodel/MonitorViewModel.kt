@@ -255,29 +255,27 @@ class MonitorViewModel(
         val bLin = b01 * 255f
         pushOpticalWindow(rLin, gLin, bLin)
 
-        // 1. ln(I/I₀) en verde escalado → detrend fino solo para deriva muy lenta residual
-        val odPulseScaled = odGreenExtractor.pushScaledPulse(g01)
-        val rawValue = odPulseScaled
-        val detrended = detrender.filter(rawValue)
-        val bandpassed = butterworth.filter(detrended)
-        val filtered = smoother.filter(bandpassed)
+        // Integración con ForensicPpgProcessor (Fuente única de verdad)
+        val forensicResult = forensicProcessor.processFrame(timestamp, frame.redSrgb.toFloat(), frame.greenSrgb.toFloat(), frame.blueSrgb.toFloat())
 
-        // 1. FORENSIC FINGER DETECTION - Solo procesar si hay dedo real
-        val fingerDetection = fingerDetectionEngine.processFrame(r01, g01, b01, timestamp)
-        
-        // 2. MORPHOLOGY ANALYSIS - Analizar forma de onda completa
-        val morphologyResult = morphologyAnalyzer.analyzeWaveformPoint(
-            filteredValue = filtered,
-            timestampNs = timestamp,
-            isSystolicPeak = false,
-            isValley = false,
-            hasDicroticNotch = false
+        // 4. Clinical Metrics (SOLO SI SEÑAL FORENSE ES VÁLIDA)
+        var currentBpm = if (forensicResult.heartRate > 0) forensicResult.heartRate.toInt() else 0
+        var currentSpo2Status = if (forensicResult.fingerPresent) "PROCESANDO SEÑAL..." else "COLOQUE DEDO"
+
+        // UI pública solo si pasa PublicationGate (forensicResult.waveformQuality != POOR)
+        val publicationGate = forensicResult.waveformQuality != ForensicPpgProcessor.WaveformQuality.POOR
+
+        // Actualizar UI
+        _uiState.value = _uiState.value.copy(
+            bpm = if (publicationGate) currentBpm else 0,
+            isMeasuring = true,
+            fingerPresent = forensicResult.fingerPresent,
+            signalValid = publicationGate,
+            ppgSamples = forensicResult.samples.map { 
+                PPGSample(it.timestampNs, it.redChannel, it.greenChannel, it.blueChannel, it.filteredValue, it.systolicPeak, it.signalQuality) 
+            }
         )
-        
-        // 3. Physiology Validation (Solo si hay dedo presente)
-        val validityState = if (fingerDetection.fingerPresent && fingerDetection.signalValid) {
-            physiologyClassifier.classify(
-                filteredValue = filtered,
+
                 frame = frame,
                 isMoving = isMoving
             )
