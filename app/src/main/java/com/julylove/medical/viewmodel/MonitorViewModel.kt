@@ -22,7 +22,7 @@ class MonitorViewModel(
     data class MonitorState(
         val bpm: Int = 0,
         val spo2: Float = 0f,
-        val spo2Status: String = "ESPERANDO SEÑAL",
+        val spo2Status: String = "ESPERANDO DEDO",
         val validityState: PpgValidityState = PpgValidityState.MEASURING_RAW_OPTICAL,
         val rhythmStatus: RhythmAnalysisEngine.RhythmStatus = RhythmAnalysisEngine.RhythmStatus.CALIBRATING,
         val ppgSamples: List<PPGSample> = emptyList(),
@@ -35,7 +35,14 @@ class MonitorViewModel(
         /** Adquisición de mediana línea‑negra (mantener dedo alejado o tapón opaco durante el contaje). */
         val darkCalibrationCollecting: Boolean = false,
         val darkCalibrationReady: Boolean = false,
-        val showCalibrationScreen: Boolean = false
+        val showCalibrationScreen: Boolean = false,
+        // Nuevos campos para detección forense
+        val fingerPresent: Boolean = false,
+        val signalQuality: SignalQuality = SignalQuality.NO_SIGNAL,
+        val signalValid: Boolean = false,
+        val waveformType: WaveType = WaveType.NO_SIGNAL,
+        val abnormalities: List<PPGAbnormality> = emptyList(),
+        val detectionConfidence: Float = 0f
     )
 
     data class TechnicalData(
@@ -48,6 +55,7 @@ class MonitorViewModel(
         val signalConfidence: Float = 0f,
         val redDC: Float = 0f,
         val greenDC: Float = 0f,
+        val blueDC: Float = 0f,
         val motionIntensity: Float = 0f,
         val quadrantBalanceRed: Float = 0f,
         val blockLumaStd: Float = 0f,
@@ -85,6 +93,10 @@ class MonitorViewModel(
     private val heartRateFusion = HeartRateFusion()
     private val beatClassifier = BeatClassifier()
     private val arrhythmiaScreening = ArrhythmiaScreening()
+    
+    // New Forensic Detection Components
+    private val fingerDetectionEngine = FingerDetectionEngine()
+    private val morphologyAnalyzer = PPGMorphologyAnalyzer()
     
     // Legacy components (maintained for compatibility)
     private val peakDetector = PpgPeakDetector(30f)
@@ -250,12 +262,27 @@ class MonitorViewModel(
         val bandpassed = butterworth.filter(detrended)
         val filtered = smoother.filter(bandpassed)
 
-        // 2. Physiology Validation (Gatekeeper)
-        val validityState = physiologyClassifier.classify(
-            filteredValue = filtered,
-            frame = frame,
-            isMoving = isMoving
+        // 1. FORENSIC FINGER DETECTION - Solo procesar si hay dedo real
+        val fingerDetection = fingerDetectionEngine.processFrame(r01, g01, b01, timestamp)
+        
+        // 2. MORPHOLOGY ANALYSIS - Analizar forma de onda completa
+        val morphologyResult = morphologyAnalyzer.analyzeWaveformPoint(
+            value = filtered,
+            timestamp = timestamp,
+            isPeak = false, // Se actualizará después de detección de picos
+            isValley = false
         )
+        
+        // 3. Physiology Validation (Solo si hay dedo presente)
+        val validityState = if (fingerDetection.fingerPresent && fingerDetection.signalValid) {
+            physiologyClassifier.classify(
+                filteredValue = filtered,
+                frame = frame,
+                isMoving = isMoving
+            )
+        } else {
+            PpgValidityState.NO_FINGER_DETECTED
+        }
 
         val perfusionProxy = ((kotlin.math.abs(filtered) + 1e-3f) / frame.redSrgb.coerceAtLeast(1f)) * 100f
         val sqiFrame = if (validityState == PpgValidityState.PPG_VALID) {
@@ -268,7 +295,7 @@ class MonitorViewModel(
             )
         } else 0f
 
-        // 4. Clinical Metrics (ONLY IF VALID)
+        // 4. Clinical Metrics (SOLO SI SEÑAL FORENSE ES VÁLIDA)
         var currentBpm = _uiState.value.bpm
         var currentRhythm = _uiState.value.rhythmStatus
         var currentRmssd = _uiState.value.technicalData.rmssd
@@ -277,15 +304,23 @@ class MonitorViewModel(
         var currentH = _uiState.value.technicalData.shannonEntropyBits
         var currentSampEn = _uiState.value.technicalData.sampleEntropy
         var currentSpo2 = _uiState.value.spo2
-        var currentSpo2Status = _uiState.value.spo2Status
+        var currentSpo2Status = when {
+            !fingerDetection.fingerPresent -> "COLOQUE DEDO"
+            !fingerDetection.signalValid -> "SEÑAL INVÁLIDA"
+            fingerDetection.signalQuality == SignalQuality.EXCELLENT -> "SEÑAL EXCELENTE"
+            fingerDetection.signalQuality == SignalQuality.GOOD -> "BUENA SEÑAL"
+            fingerDetection.signalQuality == SignalQuality.ACCEPTABLE -> "SEÑAL ACEPTABLE"
+            fingerDetection.signalQuality == SignalQuality.POOR -> "SEÑAL DÉBIL"
+            else -> "MEJORORAR CONTACTO"
+        }
 
-        // 3. Advanced Peak Detection & Fusion
+        // 5. Advanced Peak Detection & Fusion (SOLO CON SEÑAL FORENSE VÁLIDA)
         var isPeak = false
         var fusedBeat: HeartRateFusion.FusedBeat? = null
         var classifiedBeat: BeatClassifier.ClassifiedBeat? = null
         var arrhythmiaEvent: ArrhythmiaScreening.ArrhythmiaEvent? = null
         
-        if (validityState == PpgValidityState.PPG_VALID) {
+        if (validityState == PpgValidityState.PPG_VALID && fingerDetection.signalValid) {
             // Detectar picos con ambos métodos
             val elgendiPeak = elgendiDetector.process(filtered, timestamp)
             val derivativePeak = derivativeDetector.process(filtered, timestamp)
@@ -307,12 +342,21 @@ class MonitorViewModel(
                 fusedBeat.bpmInstant?.let { bpm ->
                     currentBpm = bpm.toInt()
                 }
+                
+                // Actualizar análisis de morfología con pico detectado
+                morphologyAnalyzer.analyzeWaveformPoint(
+                    value = filtered,
+                    timestamp = timestamp,
+                    isPeak = true,
+                    isValley = false
+                )
             }
         } else {
             // Resetear detectores si señal no es válida
             elgendiDetector.reset()
             derivativeDetector.reset()
             heartRateFusion.reset()
+            morphologyAnalyzer.reset()
         }
 
         if (validityState == PpgValidityState.PPG_VALID) {
@@ -403,7 +447,7 @@ class MonitorViewModel(
             peakDetector.updateSampleRate(fs)
         }
 
-        // 7. Atomic State Update
+        // 7. Atomic State Update con datos forenses
         _uiState.value = _uiState.value.copy(
             bpm = currentBpm,
             spo2 = currentSpo2,
@@ -415,23 +459,31 @@ class MonitorViewModel(
             ppgSamples = ppgBuffer.toList(),
             classifiedBeats = currentClassifiedBeats.toList(),
             arrhythmiaEvents = currentArrhythmiaEvents.toList(),
-            technicalData = TechnicalData(
+            technicalData = _uiState.value.technicalData.copy(
                 fps = currentFps,
                 rmssd = currentRmssd,
                 pnn50 = currentPnn50,
                 cv = currentCv,
                 shannonEntropyBits = currentH,
                 sampleEntropy = currentSampEn,
-                signalConfidence = if (validityState == PpgValidityState.PPG_VALID) sqiFrame else 0.15f,
+                signalConfidence = fingerDetection.confidence,
                 redDC = frame.redSrgb,
                 greenDC = frame.greenSrgb,
+                blueDC = frame.blueSrgb,
                 motionIntensity = motionDetector.motionIntensity,
                 quadrantBalanceRed = frame.quadrantBalanceRed,
-                blockLumaStd = frame.blockLumaStd,
-                interBlockGradient = frame.interBlockGradient,
+                blockLumaStd = 0f, // Temporalmente hardcodeado hasta implementar
+                interBlockGradient = 0f, // Temporalmente hardcodeado hasta implementar
                 odPulseScaled = odPulseScaled,
-                odBaselineGreen01 = odGreenExtractor.baselineGreen01()
-            )
+                odBaselineGreen01 = odGreenExtractor.baseline
+            ),
+            // Nuevos campos forenses
+            fingerPresent = fingerDetection.fingerPresent,
+            signalQuality = fingerDetection.signalQuality,
+            signalValid = fingerDetection.signalValid,
+            waveformType = morphologyResult.waveType,
+            abnormalities = morphologyResult.abnormalities,
+            detectionConfidence = fingerDetection.confidence
         )
     }
 

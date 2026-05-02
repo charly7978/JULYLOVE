@@ -34,10 +34,16 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import com.julylove.medical.camera.AmbientLightMonitor
 import com.julylove.medical.camera.Camera2PpgController
+import com.julylove.medical.signal.*
 import com.julylove.medical.signal.PpgValidityState
 import com.julylove.medical.signal.RhythmAnalysisEngine
 import com.julylove.medical.ui.theme.*
 import com.julylove.medical.viewmodel.MonitorViewModel
+import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.pow
+import kotlin.math.sqrt
 
 class MainActivity : ComponentActivity() {
 
@@ -129,11 +135,16 @@ fun FullScreenMonitor(viewModel: MonitorViewModel) {
         .fillMaxSize()
         .background(MedicalBlack)) {
         
-        // 1. MONITOR CARDIACO FULL SCREEN (Background Layer)
+        // 1. MONITOR CARDIACO FULL SCREEN FORENSE (Background Layer)
         if (!state.showCalibrationScreen) {
             PPGWaveformCanvas(
                 samples = state.ppgSamples,
                 isMeasuring = state.isMeasuring,
+                fingerPresent = state.fingerPresent,
+                signalValid = state.signalValid,
+                signalQuality = state.signalQuality,
+                waveformType = state.waveformType,
+                abnormalities = state.abnormalities,
                 rhythmStatus = state.rhythmStatus,
                 classifiedBeats = state.classifiedBeats,
                 arrhythmiaEvents = state.arrhythmiaEvents,
@@ -232,8 +243,19 @@ fun FullScreenMonitor(viewModel: MonitorViewModel) {
                     .padding(12.dp)
             ) {
                 Column {
-                    Text("ANÁLISIS_DE_SEÑAL", style = Typography.labelSmall, color = MedicalCyan, fontWeight = FontWeight.Bold)
+                    Text("ANÁLISIS_FORENSE", style = Typography.labelSmall, color = MedicalCyan, fontWeight = FontWeight.Bold)
                     Spacer(modifier = Modifier.height(8.dp))
+                    
+                    // Indicadores Forenses Principales
+                    TechnicalValue("PRESENCIA_DEDO", if (state.fingerPresent) "DETECTADO" else "AUSENTE")
+                    TechnicalValue("SEÑAL_VALIDA", if (state.signalValid) "VÁLIDA" else "INVÁLIDA")
+                    TechnicalValue("CALIDAD_SEÑAL", translateSignalQuality(state.signalQuality))
+                    TechnicalValue("TIPO_ONDA", translateWaveType(state.waveType))
+                    TechnicalValue("CONFIANZA", "${(state.detectionConfidence * 100).toInt()}%")
+                    
+                    Spacer(modifier = Modifier.height(8.dp))
+                    
+                    // Métricas Técnicas
                     TechnicalValue("VALIDEZ", translateValidity(state.validityState))
                     TechnicalValue("CONFIANZA", "${(state.technicalData.signalConfidence * 100).toInt()}%")
                     TechnicalValue("RMSSD", "${"%.1f".format(state.technicalData.rmssd)} ms")
@@ -244,21 +266,18 @@ fun FullScreenMonitor(viewModel: MonitorViewModel) {
                         "SAMPEN",
                         state.technicalData.sampleEntropy?.let { "%.3f".format(it) } ?: "—"
                     )
-                    TechnicalValue("QBAL_R", "${"%.3f".format(state.technicalData.quadrantBalanceRed)}")
-                    TechnicalValue("SIG_BLOK", "${"%.2f".format(state.technicalData.blockLumaStd)}")
-                    TechnicalValue("GRAD_I", "${"%.1f".format(state.technicalData.interBlockGradient)}")
-                    TechnicalValue("INDICE_MOV", "${"%.3f".format(state.technicalData.motionIntensity)}")
-                    TechnicalValue("FPS_MUESTREO", "${state.technicalData.fps}")
-                    TechnicalValue("LN_I_I0", "${"%.4f".format(state.technicalData.odPulseScaled)}")
-                    TechnicalValue("I0_VERDE", "${"%.5f".format(state.technicalData.odBaselineGreen01)}")
-                    TechnicalValue(
-                        "OSC_CALIB",
-                        when {
-                            state.darkCalibrationCollecting -> "ADQUIER..."
-                            state.darkCalibrationReady -> "LISTO"
-                            else -> "---"
+                    
+                    // Anomalías Detectadas
+                    if (state.abnormalities.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text("ANOMALÍAS", style = Typography.labelSmall, color = MedicalRed, fontWeight = FontWeight.Bold)
+                        state.abnormalities.take(3).forEach { abnormality ->
+                            TechnicalValue(
+                                abnormality.type.name,
+                                "${abnormality.severity.name} (${"%.2f".format(abnormality.value)})"
+                            )
                         }
-                    )
+                    }
                     
                     Spacer(modifier = Modifier.height(12.dp))
                     
@@ -435,5 +454,27 @@ fun translateValidity(state: PpgValidityState): String {
         PpgValidityState.MOTION_ARTIFACT -> "ARTEFACTO DE MOVIMIENTO"
         PpgValidityState.LOW_PERFUSION -> "BAJA PERFUSIÓN"
         PpgValidityState.ERROR -> "ERROR DE SENSOR"
+        PpgValidityState.NO_FINGER_DETECTED -> "SIN DEDO DETECTADO"
+    }
+}
+
+fun translateSignalQuality(quality: SignalQuality): String {
+    return when(quality) {
+        SignalQuality.NO_SIGNAL -> "SIN SEÑAL"
+        SignalQuality.POOR -> "DÉBIL"
+        SignalQuality.ACCEPTABLE -> "ACEPTABLE"
+        SignalQuality.GOOD -> "BUENA"
+        SignalQuality.EXCELLENT -> "EXCELENTE"
+    }
+}
+
+fun translateWaveType(type: WaveType): String {
+    return when(type) {
+        WaveType.NO_SIGNAL -> "SIN SEÑAL"
+        WaveType.WEAK -> "DÉBIL"
+        WaveType.ACCEPTABLE -> "ACEPTABLE"
+        WaveType.NORMAL -> "NORMAL"
+        WaveType.IRREGULAR -> "IRREGULAR"
+        WaveType.ABNORMAL -> "ANORMAL"
     }
 }

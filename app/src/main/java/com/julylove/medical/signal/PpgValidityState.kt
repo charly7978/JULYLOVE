@@ -9,5 +9,6 @@ enum class PpgValidityState {
     SATURATED,                    // Excess light / Clipping
     MOTION_ARTIFACT,              // Motion noise detected
     LOW_PERFUSION,                // Signal too weak for reliable calculation
-    ERROR                         // Hardware or sensor error
+    ERROR,                        // Hardware or sensor error
+    NO_FINGER_DETECTED            // No finger detected by forensic engine
 }
