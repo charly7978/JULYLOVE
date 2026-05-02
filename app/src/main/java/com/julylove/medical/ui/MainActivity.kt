@@ -3,6 +3,8 @@ package com.julylove.medical.ui
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -12,7 +14,12 @@ import androidx.activity.viewModels
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -25,29 +32,58 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
+import com.julylove.medical.camera.AmbientLightMonitor
 import com.julylove.medical.camera.Camera2PpgController
 import com.julylove.medical.signal.*
+import com.julylove.medical.signal.PpgValidityState
+import com.julylove.medical.signal.RhythmAnalysisEngine
 import com.julylove.medical.ui.theme.*
 import com.julylove.medical.viewmodel.MonitorViewModel
+import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.pow
+import kotlin.math.sqrt
 
 class MainActivity : ComponentActivity() {
 
     private lateinit var cameraController: Camera2PpgController
+    private lateinit var ambientMonitor: AmbientLightMonitor
+
+    private val luxHandler = Handler(Looper.getMainLooper())
+    private val luxTicker = object : Runnable {
+        override fun run() {
+            if (::cameraController.isInitialized && ::ambientMonitor.isInitialized) {
+                cameraController.notifyAmbientLux(ambientMonitor.lux)
+            }
+            luxHandler.postDelayed(this, 500L)
+        }
+    }
 
     private val viewModel: MonitorViewModel by viewModels(
         factoryProducer = {
             object : ViewModelProvider.Factory {
                 @Suppress("UNCHECKED_CAST")
                 override fun <T : ViewModel> create(modelClass: Class<T>): T {
+                    if (modelClass != MonitorViewModel::class.java) {
+                        throw IllegalArgumentException("Unknown ViewModel: ${modelClass.name}")
+                    }
                     return MonitorViewModel(applicationContext, cameraController) as T
                 }
             }
         }
     )
 
+    private val requestPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { _ ->
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        ambientMonitor = AmbientLightMonitor(this)
 
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         hideSystemUI()
@@ -55,16 +91,31 @@ class MainActivity : ComponentActivity() {
         cameraController = Camera2PpgController(this)
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
-            registerForActivityResult(ActivityResultContracts.RequestPermission()) {}.launch(Manifest.permission.CAMERA)
+            requestPermissionLauncher.launch(Manifest.permission.CAMERA)
         }
 
         setContent {
             JULYLOVETheme {
-                Surface(modifier = Modifier.fillMaxSize(), color = MedicalBlack) {
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = MedicalBlack
+                ) {
                     FullScreenMonitor(viewModel = viewModel)
                 }
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        ambientMonitor.start()
+        luxHandler.post(luxTicker)
+    }
+
+    override fun onPause() {
+        luxHandler.removeCallbacks(luxTicker)
+        ambientMonitor.stop()
+        super.onPause()
     }
 
     private fun hideSystemUI() {
@@ -78,100 +129,358 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun FullScreenMonitor(viewModel: MonitorViewModel) {
     val state by viewModel.uiState.collectAsState()
+    var showTelemetry by remember { mutableStateOf(true) }
 
-    Box(modifier = Modifier.fillMaxSize().background(MedicalBlack)) {
+    Box(modifier = Modifier
+        .fillMaxSize()
+        .background(MedicalBlack)) {
         
-        // 1. Capa de Fondo: Monitor de Ondas Real
-        MedicalForensicPPGCanvas(
-            samples = state.ppgSamples,
-            signalQuality = if (state.signalValid) 0.9f else 0.2f,
-            fingerDetected = state.fingerPresent,
-            modifier = Modifier.fillMaxSize()
-        )
+        // 1. MONITOR CARDIACO FULL SCREEN FORENSE (Background Layer)
+        if (!state.showCalibrationScreen) {
+            MedicalForensicPPGCanvas(
+                samples = state.ppgSamples,
+                classifiedBeats = state.classifiedBeats,
+                arrhythmiaEvents = state.arrhythmiaEvents,
+                signalQuality = when(state.signalQuality) {
+                    SignalQuality.EXCELLENT -> 0.9f
+                    SignalQuality.GOOD -> 0.7f
+                    SignalQuality.ACCEPTABLE -> 0.5f
+                    else -> 0.2f
+                },
+                fingerDetected = state.fingerPresent,
+                modifier = Modifier.fillMaxSize()
+            )
+        } else {
+            CalibrationScreen(
+                onBackToMonitor = { viewModel.toggleCalibrationScreen(false) },
+                modifier = Modifier.fillMaxSize()
+            )
+        }
 
-        // 2. Capa de Información: Telemetría y Controles
-        Column(modifier = Modifier.fillMaxSize().padding(20.dp)) {
-            
-            // Header
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+        // 2. SCANNING OVERLAY (CRT SCAN LINE EFFECT)
+        if (state.isMeasuring) {
+            ScanningOverlay()
+        }
+
+        // 3. TELEMETRÍA TÉCNICA (Top Layer)
+        // Header
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 40.dp, start = 20.dp, end = 20.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 Column {
-                    Text("UNIDAD FORENSE JULYLOVE", style = Typography.labelSmall, color = MedicalTextGray)
-                    Text(
-                        text = state.validityState.name.replace("_", " "),
-                        style = Typography.bodySmall,
-                        color = when {
-                            state.signalValid -> MedicalGreen
-                            state.validityState == PpgValidityState.NO_PPG_PHYSIOLOGICAL_SIGNAL -> MedicalRed
-                            else -> MedicalAmber
+                    Text("ID_UNIDAD: FORENSIC-7978", style = Typography.labelSmall, color = MedicalTextGray)
+                    Text("ESTADO: ${translateValidity(state.validityState)}", 
+                        style = Typography.labelSmall, 
+                        color = when(state.validityState) {
+                            PpgValidityState.PPG_VALID -> MedicalGreen
+                            PpgValidityState.PPG_CANDIDATE, PpgValidityState.SEARCHING_PPG -> MedicalAmber
+                            else -> MedicalRed
+                        })
+                }
+                Text("BIO-MONITOR JULYLOVE v1.0", style = Typography.labelSmall, color = MedicalTextGray)
+            }
+            HorizontalDivider(color = MedicalGrid, thickness = 1.dp, modifier = Modifier.padding(top = 4.dp))
+        }
+
+        // Main Clinical Indicators (Right Side)
+        Column(
+            modifier = Modifier
+                .align(Alignment.CenterEnd)
+                .padding(end = 24.dp),
+            horizontalAlignment = Alignment.End
+        ) {
+            // SECCIÓN FRECUENCIA CARDÍACA
+            Text("RITMO CARDÍACO", style = Typography.labelSmall, color = MedicalTextGray)
+            Row(verticalAlignment = Alignment.Bottom) {
+                Text(
+                    text = if (state.bpm > 0 && state.validityState == PpgValidityState.PPG_VALID) 
+                        state.bpm.toString() else "--",
+                    style = Typography.displayLarge.copy(fontSize = 100.sp, lineHeight = 100.sp),
+                    color = when(state.rhythmStatus) {
+                        RhythmAnalysisEngine.RhythmStatus.SUSPECTED_ARRHYTHMIA -> MedicalRed
+                        RhythmAnalysisEngine.RhythmStatus.IRREGULAR -> MedicalAmber
+                        else -> MedicalGreen
+                    }
+                )
+                Text("LPM", style = Typography.headlineMedium, color = MedicalTextGray, modifier = Modifier.padding(bottom = 16.dp, start = 4.dp))
+            }
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            // SECCIÓN SpO2
+            Text("SAT. OXÍGENO", style = Typography.labelSmall, color = MedicalTextGray)
+            Row(verticalAlignment = Alignment.Bottom) {
+                Text(
+                    text = if (state.spo2 > 0 && state.validityState == PpgValidityState.PPG_VALID) 
+                        state.spo2.toInt().toString() else "--",
+                    style = Typography.displayLarge.copy(fontSize = 60.sp, lineHeight = 60.sp),
+                    color = MedicalCyan
+                )
+                Text("%", style = Typography.headlineMedium.copy(fontSize = 24.sp), color = MedicalTextGray, modifier = Modifier.padding(bottom = 8.dp, start = 2.dp))
+            }
+            Text(state.spo2Status, style = Typography.labelSmall.copy(fontSize = 9.sp), color = MedicalCyan)
+
+            Spacer(modifier = Modifier.height(32.dp))
+            
+            StatusBadge(state.rhythmStatus)
+        }
+
+        // Technical Telemetry Panel (Bottom Left)
+        if (showTelemetry) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(20.dp)
+                    .width(240.dp)
+                    .background(MedicalDarkGray.copy(alpha = 0.85f))
+                    .padding(12.dp)
+            ) {
+                Column {
+                    Text("ANÁLISIS_FORENSE", style = Typography.labelSmall, color = MedicalCyan, fontWeight = FontWeight.Bold)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    
+                    // Indicadores Forenses Principales
+                    TechnicalValue("PRESENCIA_DEDO", if (state.fingerPresent) "DETECTADO" else "AUSENTE")
+                    TechnicalValue("SEÑAL_VALIDA", if (state.signalValid) "VÁLIDA" else "INVÁLIDA")
+                    TechnicalValue("CALIDAD_SEÑAL", translateSignalQuality(state.signalQuality))
+                    TechnicalValue("TIPO_ONDA", translateWaveType(state.waveformType))
+                    TechnicalValue("CONFIANZA", "${(state.detectionConfidence * 100).toInt()}%")
+                    
+                    Spacer(modifier = Modifier.height(8.dp))
+                    
+                    // Métricas Técnicas
+                    TechnicalValue("VALIDEZ", translateValidity(state.validityState))
+                    TechnicalValue("CONFIANZA", "${(state.technicalData.signalConfidence * 100).toInt()}%")
+                    TechnicalValue("RMSSD", "${"%.1f".format(state.technicalData.rmssd)} ms")
+                    TechnicalValue("pNN50", "${"%.1f".format(state.technicalData.pnn50)}%")
+                    TechnicalValue("COEF_VAR", "${"%.1f".format(state.technicalData.cv)}%")
+                    TechnicalValue("H_SHANNON", "${"%.2f".format(state.technicalData.shannonEntropyBits)} bit")
+                    TechnicalValue(
+                        "SAMPEN",
+                        state.technicalData.sampleEntropy?.let { "%.3f".format(it) } ?: "—"
+                    )
+                    
+                    // Anomalías Detectadas
+                    if (state.abnormalities.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text("ANOMALÍAS", style = Typography.labelSmall, color = MedicalRed, fontWeight = FontWeight.Bold)
+                        state.abnormalities.take(3).forEach { abnormality ->
+                            TechnicalValue(
+                                abnormality.name,
+                                "DETECTADO"
+                            )
                         }
-                    )
-                }
-                
-                Column(horizontalAlignment = Alignment.End) {
-                    Text("FPS: ${state.fps}", style = Typography.labelSmall, color = MedicalTextGray)
-                    Text("LAT: ${state.latencyMs}ms", style = Typography.labelSmall, color = MedicalTextGray)
+                    }
+                    
+                    Spacer(modifier = Modifier.height(12.dp))
+                    
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("BEEP", style = Typography.labelSmall, color = MedicalTextGray)
+                        Switch(
+                            checked = state.beepEnabled,
+                            onCheckedChange = { viewModel.toggleBeep(it) },
+                            colors = SwitchDefaults.colors(checkedThumbColor = MedicalGreen)
+                        )
+                    }
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("HÁPTICO", style = Typography.labelSmall, color = MedicalTextGray)
+                        Switch(
+                            checked = state.vibrationEnabled,
+                            onCheckedChange = { viewModel.toggleVibration(it) },
+                            colors = SwitchDefaults.colors(checkedThumbColor = MedicalGreen)
+                        )
+                    }
+                    
+                    Spacer(modifier = Modifier.height(12.dp))
+                    
+                    OutlinedButton(
+                        onClick = { viewModel.toggleCalibrationScreen(true) },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = androidx.compose.ui.graphics.RectangleShape,
+                        border = androidx.compose.foundation.BorderStroke(1.dp, MedicalCyan)
+                    ) {
+                        Text(
+                            text = "CALIBRACIÓN SpO₂",
+                            style = Typography.labelSmall,
+                            color = MedicalCyan,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    OutlinedButton(
+                        onClick = { viewModel.startDarkFrameCalibration() },
+                        enabled = state.isMeasuring && !state.darkCalibrationCollecting,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = androidx.compose.ui.graphics.RectangleShape,
+                        border = androidx.compose.foundation.BorderStroke(1.dp, MedicalGrid)
+                    ) {
+                        Text(
+                            text = when {
+                                state.darkCalibrationCollecting -> "CAPTURA OSCURA…"
+                                state.darkCalibrationReady -> "CAL. OSCURO: OK"
+                                else -> "CAL. OSCURO (~1 s tapado)"
+                            },
+                            style = Typography.labelSmall,
+                            color = MedicalAmber,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+                    
+                    Button(
+                        onClick = { viewModel.toggleMeasurement() },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = androidx.compose.ui.graphics.RectangleShape,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (state.isMeasuring) MedicalRed else MedicalGreen
+                        )
+                    ) {
+                        Text(
+                            text = if (state.isMeasuring) "DETENER ANALIZADOR" else "INICIAR ANALIZADOR",
+                            color = MedicalBlack,
+                            style = Typography.bodyMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                 }
             }
+        }
 
-            Spacer(modifier = Modifier.height(20.dp))
-
-            // Indicadores Principales
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceAround) {
-                // BPM
+        // State Overlays
+        if (state.isMeasuring && state.validityState != PpgValidityState.PPG_VALID) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(MedicalBlack.copy(alpha = 0.8f)),
+                contentAlignment = Alignment.Center
+            ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("BPM", style = Typography.labelSmall, color = MedicalTextGray)
-                    Text(
-                        text = if (state.bpm > 0) state.bpm.toString() else "--",
-                        style = Typography.displayLarge.copy(fontSize = 72.sp),
-                        color = if (state.signalValid) MedicalGreen else MedicalTextGray
-                    )
-                }
-
-                // SpO2
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("SpO₂", style = Typography.labelSmall, color = MedicalTextGray)
-                    Text(
-                        text = if (state.spo2 > 0) "${state.spo2.toInt()}%" else "--%",
-                        style = Typography.displayLarge.copy(fontSize = 72.sp),
-                        color = if (state.signalValid) MedicalCyan else MedicalTextGray
-                    )
-                    Text(state.spo2Status, style = Typography.labelSmall.copy(fontSize = 8.sp), color = MedicalCyan)
-                }
-            }
-
-            Spacer(modifier = Modifier.weight(1f))
-
-            // Panel de Control Inferior
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                
-                // Switches de Haptics
-                Row {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("BEEP", style = Typography.labelSmall.copy(fontSize = 8.sp), color = MedicalTextGray)
-                        Switch(checked = state.beepEnabled, onCheckedChange = { viewModel.toggleBeep(it) })
+                    if (state.validityState == PpgValidityState.SEARCHING_PPG || state.validityState == PpgValidityState.PPG_CANDIDATE) {
+                        CircularProgressIndicator(color = MedicalAmber)
                     }
-                    Spacer(modifier = Modifier.width(10.dp))
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("VIBRA", style = Typography.labelSmall.copy(fontSize = 8.sp), color = MedicalTextGray)
-                        Switch(checked = state.vibrationEnabled, onCheckedChange = { viewModel.toggleVibration(it) })
-                    }
-                }
-
-                // Botón Principal
-                Button(
-                    onClick = { viewModel.toggleMeasurement() },
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (state.isMeasuring) MedicalRed else MedicalGreen
-                    ),
-                    shape = androidx.compose.foundation.shape.RoundedCornerShape(4.dp)
-                ) {
+                    Spacer(modifier = Modifier.height(20.dp))
                     Text(
-                        text = if (state.isMeasuring) "DETENER" else "INICIAR MONITOR",
-                        color = MedicalBlack,
-                        fontWeight = FontWeight.Bold
+                        text = when(state.validityState) {
+                            PpgValidityState.NO_PPG_PHYSIOLOGICAL_SIGNAL -> "SEÑAL NO FISIOLÓGICA DETECTADA\n(Verifique la posición del dedo)"
+                            PpgValidityState.SEARCHING_PPG -> "ANALIZANDO PULSATILIDAD..."
+                            PpgValidityState.PPG_CANDIDATE -> "ESTABILIZANDO SEÑAL PPG..."
+                            PpgValidityState.SATURATED -> "SEÑAL SATURADA - REDUZCA LA PRESIÓN"
+                            PpgValidityState.MOTION_ARTIFACT -> "MOVIMIENTO EXCESIVO DETECTADO"
+                            PpgValidityState.LOW_PERFUSION -> "BAJA PERFUSIÓN - CALIENTE EL DEDO"
+                            else -> "LISTO PARA ADQUISICIÓN"
+                        },
+                        style = Typography.headlineMedium,
+                        color = if (state.validityState == PpgValidityState.NO_PPG_PHYSIOLOGICAL_SIGNAL) MedicalRed else MedicalAmber,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                        modifier = Modifier.padding(horizontal = 40.dp)
                     )
                 }
             }
         }
+    }
+}
+
+@Composable
+fun ScanningOverlay() {
+    // Simple vertical scan line animation could be added here
+    Box(modifier = Modifier
+        .fillMaxSize()
+        .background(
+            brush = androidx.compose.ui.graphics.Brush.verticalGradient(
+                colors = listOf(
+                    Color.Transparent,
+                    MedicalGreen.copy(alpha = 0.05f),
+                    Color.Transparent
+                )
+            )
+        )
+    )
+}
+
+@Composable
+fun TechnicalValue(label: String, value: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 1.dp),
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(label, style = Typography.labelSmall.copy(fontSize = 9.sp), color = MedicalTextGray)
+        Text(value, style = Typography.labelSmall.copy(fontSize = 9.sp), color = MedicalGreen)
+    }
+}
+
+@Composable
+fun StatusBadge(status: RhythmAnalysisEngine.RhythmStatus) {
+    val (color, text) = when(status) {
+        RhythmAnalysisEngine.RhythmStatus.REGULAR -> MedicalGreen to "RITMO REGULAR"
+        RhythmAnalysisEngine.RhythmStatus.IRREGULAR -> MedicalAmber to "RITMO IRREGULAR"
+        RhythmAnalysisEngine.RhythmStatus.SUSPECTED_ARRHYTHMIA -> MedicalRed to "ARRITMIA DETECTADA"
+        RhythmAnalysisEngine.RhythmStatus.CALIBRATING -> MedicalTextGray to "CALIBRANDO"
+    }
+    
+    Surface(
+        color = color.copy(alpha = 0.2f),
+        border = androidx.compose.foundation.BorderStroke(1.dp, color),
+        shape = androidx.compose.foundation.shape.RoundedCornerShape(4.dp)
+    ) {
+        Text(
+            text = text,
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+            style = Typography.labelSmall,
+            color = color
+        )
+    }
+}
+
+fun translateValidity(state: PpgValidityState): String {
+    return when(state) {
+        PpgValidityState.MEASURING_RAW_OPTICAL -> "ADQUISICIÓN ÓPTICA"
+        PpgValidityState.NO_PPG_PHYSIOLOGICAL_SIGNAL -> "SIN SEÑAL FISIOLÓGICA"
+        PpgValidityState.SEARCHING_PPG -> "BUSCANDO PULSO"
+        PpgValidityState.PPG_CANDIDATE -> "CANDIDATO PPG"
+        PpgValidityState.PPG_VALID -> "SEÑAL VÁLIDA"
+        PpgValidityState.SATURATED -> "SATURACIÓN"
+        PpgValidityState.MOTION_ARTIFACT -> "ARTEFACTO DE MOVIMIENTO"
+        PpgValidityState.LOW_PERFUSION -> "BAJA PERFUSIÓN"
+        PpgValidityState.ERROR -> "ERROR DE SENSOR"
+        PpgValidityState.NO_FINGER_DETECTED -> "SIN DEDO DETECTADO"
+    }
+}
+
+fun translateSignalQuality(quality: SignalQuality): String {
+    return when(quality) {
+        SignalQuality.NO_SIGNAL -> "SIN SEÑAL"
+        SignalQuality.POOR -> "DÉBIL"
+        SignalQuality.ACCEPTABLE -> "ACEPTABLE"
+        SignalQuality.GOOD -> "BUENA"
+        SignalQuality.EXCELLENT -> "EXCELENTE"
+    }
+}
+
+fun translateWaveType(type: WaveType): String {
+    return when(type) {
+        WaveType.NO_SIGNAL -> "SIN SEÑAL"
+        WaveType.WEAK -> "DÉBIL"
+        WaveType.ACCEPTABLE -> "ACEPTABLE"
+        WaveType.NORMAL -> "NORMAL"
+        WaveType.NORMAL_TRIFFASIC -> "NORMAL TRI-FÁSICA"
+        WaveType.NORMAL_BIFFASIC -> "NORMAL BI-FÁSICA"
+        WaveType.IRREGULAR -> "IRREGULAR"
+        WaveType.ABNORMAL -> "ANORMAL"
+        WaveType.ABNORMAL_MORPHOLOGY -> "MORFOLOGÍA ANORMAL"
+        WaveType.ARTIFACT_RAPID_PEAKS -> "ARTEFACTO: PICOS RÁPIDOS"
+        WaveType.DAMPED_WAVEFORM -> "ONDAS AMORTIGUADAS"
+        WaveType.FLAT_WAVEFORM -> "ONDAS PLANAS"
     }
 }

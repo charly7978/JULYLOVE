@@ -1,5 +1,7 @@
-import Index from "./pages/Index";
+import { useMonitor } from './hooks/useMonitor'
+import { MonitorScreen } from './ui/MonitorScreen'
 
 export default function App() {
-  return <Index />;
+  const monitor = useMonitor()
+  return <MonitorScreen monitor={monitor} />
 }

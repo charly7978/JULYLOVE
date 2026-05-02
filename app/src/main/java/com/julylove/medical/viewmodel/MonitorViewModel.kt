@@ -6,7 +6,9 @@ import androidx.lifecycle.viewModelScope
 import com.julylove.medical.camera.Camera2PpgController
 import com.julylove.medical.camera.PpgCameraFrame
 import com.julylove.medical.signal.*
-import com.julylove.medical.haptics.BeatFeedbackController
+import com.julylove.medical.sensors.MotionSensorController
+import com.julylove.medical.data.*
+import com.julylove.medical.haptics.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
@@ -17,43 +19,126 @@ class MonitorViewModel(
     private val cameraController: Camera2PpgController
 ) : ViewModel(), Camera2PpgController.OnFrameAvailableListener {
 
-    data class MonitorUiState(
-        val cameraRunning: Boolean = false,
-        val isMeasuring: Boolean = false,
-        val validityState: PpgValidityState = PpgValidityState.MEASURING_RAW_OPTICAL,
-        val ppgSamples: List<PPGSample> = emptyList(),
+    data class MonitorState(
         val bpm: Int = 0,
-        val bpmConfidence: Float = 0f,
         val spo2: Float = 0f,
-        val spo2Status: String = "ESTABILIZANDO",
+        val spo2Status: String = "ESPERANDO DEDO",
+        val validityState: PpgValidityState = PpgValidityState.MEASURING_RAW_OPTICAL,
         val rhythmStatus: RhythmAnalysisEngine.RhythmStatus = RhythmAnalysisEngine.RhythmStatus.CALIBRATING,
-        val fps: Int = 0,
-        val latencyMs: Long = 0,
-        val signalValid: Boolean = false,
-        val fingerPresent: Boolean = false,
+        val ppgSamples: List<PPGSample> = emptyList(),
+        val classifiedBeats: List<BeatClassifier.ClassifiedBeat> = emptyList(),
+        val arrhythmiaEvents: List<ArrhythmiaScreening.ArrhythmiaEvent> = emptyList(),
+        val isMeasuring: Boolean = false,
+        val technicalData: TechnicalData = TechnicalData(),
         val beepEnabled: Boolean = true,
-        val vibrationEnabled: Boolean = true
+        val vibrationEnabled: Boolean = true,
+        /** Adquisición de mediana línea‑negra (mantener dedo alejado o tapón opaco durante el contaje). */
+        val darkCalibrationCollecting: Boolean = false,
+        val darkCalibrationReady: Boolean = false,
+        val showCalibrationScreen: Boolean = false,
+        // Nuevos campos para detección forense
+        val fingerPresent: Boolean = false,
+        val signalQuality: SignalQuality = SignalQuality.NO_SIGNAL,
+        val signalValid: Boolean = false,
+        val waveformType: WaveType = WaveType.NO_SIGNAL,
+        val abnormalities: List<PPGAbnormality> = emptyList(),
+        val detectionConfidence: Float = 0f
     )
 
-    private val _uiState = MutableStateFlow(MonitorUiState())
+    data class TechnicalData(
+        val fps: Int = 0,
+        val rmssd: Double = 0.0,
+        val pnn50: Double = 0.0,
+        val cv: Double = 0.0,
+        val shannonEntropyBits: Double = 0.0,
+        val sampleEntropy: Double? = null,
+        val signalConfidence: Float = 0f,
+        val redDC: Float = 0f,
+        val greenDC: Float = 0f,
+        val blueDC: Float = 0f,
+        val motionIntensity: Float = 0f,
+        val quadrantBalanceRed: Float = 0f,
+        val blockLumaStd: Float = 0f,
+        val interBlockGradient: Float = 0f,
+        val odPulseScaled: Float = 0f,
+        /** I₀ estimado canal verde (lineal 0–1 tras dark offset si aplica). */
+        val odBaselineGreen01: Float = 0f
+    )
+
+    private val _uiState = MutableStateFlow(MonitorState())
     val uiState = _uiState.asStateFlow()
 
-    // Pipeline Principal (Arquitectura Reconstruida)
-    private val signalBuffer = PpgSignalBuffer(300)
-    private val bandpass = ButterworthBandpass(30f)
-    private val classifier = PpgPhysiologyClassifier()
-    private val peakDetector = PpgPeakDetector(30f)
-    private val bpmEstimator = BpmEstimator()
-    private val spo2Estimator = Spo2Estimator()
-    private val rhythmAnalyzer = RhythmAnalysisEngine()
-    private val haptics = BeatFeedbackController(context)
+    private val ppgBuffer = mutableListOf<PPGSample>()
+    private val ppiHistory = mutableListOf<Long>()
+    private val maxBufferSize = 400 // ~6-7 seconds of visualization
 
-    private val ppgSampleHistory = mutableListOf<PPGSample>()
-    private val maxHistorySize = 300
-    private var lastFrameTime = 0L
+    private val opticalRedWindow = mutableListOf<Float>()
+    private val opticalGreenWindow = mutableListOf<Float>()
+    private val opticalBlueWindow = mutableListOf<Float>()
+    private val opticalWindowCap = 64
+    
+    private val exportService = ExportService(context)
+
+    // Pipeline Components
+    private val physiologyClassifier = PpgPhysiologyClassifier()
+    private val feedbackController = BeatFeedbackController(context)
+    private val odGreenExtractor = Radiometry.OpticalDensityGreen()
+    private val detrender = DetrendingFilter(14)
+    private val butterworth = ButterworthBandpass(60f)
+    private val smoother = SavitzkyGolayFilter()
+    
+    // Advanced Detection Pipeline
+    private val elgendiDetector = PeakDetectorElgendi(60f)
+    private val derivativeDetector = PeakDetectorDerivative(60f)
+    private val heartRateFusion = HeartRateFusion()
+    private val beatClassifier = BeatClassifier()
+    private val arrhythmiaScreening = ArrhythmiaScreening()
+    
+    // New Forensic Detection Components
+    private val fingerDetectionEngine = FingerDetectionEngine()
+    private val morphologyAnalyzer = PPGMorphologyAnalyzer()
+    
+    // Legacy components (maintained for compatibility)
+    private val peakDetector = PpgPeakDetector(30f)
+    private val rhythmEngine = RhythmAnalysisEngine()
+    private val spo2Estimator = Spo2Estimator()
+    private val motionDetector = MotionArtifactDetector(context)
+    
+    // New motion sensor controller
+    private val motionSensorController = MotionSensorController(context)
+
+    private var lastPeakTime = 0L
+    private var frameCount = 0
+    private var lastFpsTimestamp = 0L
+    private var sessionId = ""
+
+    private var darkOffsetLinearR = 0f
+    private var darkOffsetLinearG = 0f
+    private var darkOffsetLinearB = 0f
+
+    /** Frames restantes de calibración oscura; null = inactivo. */
+    private var darkCollectionRemaining: Int? = null
+    private val darkScratchR = mutableListOf<Float>()
+    private val darkScratchG = mutableListOf<Float>()
+    private val darkScratchB = mutableListOf<Float>()
+    private var darkCalibrationReadyFlag = false
 
     init {
         cameraController.listener = this
+        spo2Estimator.setProfileForDevice(android.os.Build.MODEL)
+        
+        // Configurar motion sensor controller
+        motionSensorController.listener = object : MotionSensorController.MotionListener {
+            override fun onMotionUpdate(motionData: MotionSensorController.MotionData) {
+                // Actualizar estado de movimiento en tiempo real
+                val currentState = _uiState.value
+                _uiState.value = currentState.copy(
+                    technicalData = currentState.technicalData.copy(
+                        motionIntensity = motionData.motionIntensity
+                    )
+                )
+            }
+        }
     }
 
     fun toggleMeasurement() {
@@ -65,135 +150,428 @@ class MonitorViewModel(
     }
 
     private fun startMeasurement() {
-        resetPipeline()
+        sessionId = UUID.randomUUID().toString().take(8).uppercase()
+        ppgBuffer.clear()
+        ppiHistory.clear()
+        opticalRedWindow.clear()
+        opticalGreenWindow.clear()
+        opticalBlueWindow.clear()
+        
+        // Reset all detection components
+        physiologyClassifier.reset()
+        elgendiDetector.reset()
+        derivativeDetector.reset()
+        heartRateFusion.reset()
+        beatClassifier.reset()
+        arrhythmiaScreening.reset()
+        peakDetector.reset()
+        rhythmEngine.reset()
+        detrender.reset()
+        butterworth.reset()
+        smoother.reset()
+        odGreenExtractor.reset()
+        
+        darkOffsetLinearR = 0f
+        darkOffsetLinearG = 0f
+        darkOffsetLinearB = 0f
+        darkCollectionRemaining = null
+        darkCalibrationReadyFlag = false
+        darkScratchR.clear()
+        darkScratchG.clear()
+        darkScratchB.clear()
+        
         cameraController.start()
-        _uiState.value = _uiState.value.copy(isMeasuring = true, cameraRunning = true)
+        motionDetector.start()
+        motionSensorController.start()
+        
+        _uiState.value = _uiState.value.copy(
+            isMeasuring = true, 
+            bpm = 0, 
+            spo2 = 0f,
+            classifiedBeats = emptyList(),
+            arrhythmiaEvents = emptyList()
+        )
     }
 
     private fun stopMeasurement() {
         cameraController.stop()
-        _uiState.value = _uiState.value.copy(isMeasuring = false, cameraRunning = false)
-    }
-
-    private fun resetPipeline() {
-        signalBuffer.clear()
-        classifier.reset()
-        peakDetector.reset()
-        bpmEstimator.reset()
-        rhythmAnalyzer.reset()
-        ppgSampleHistory.clear()
+        motionDetector.stop()
+        motionSensorController.stop()
+        
+        // Save Session
+        if (ppgBuffer.isNotEmpty()) {
+            val td = _uiState.value.technicalData
+            val session = MeasurementSession(
+                id = sessionId,
+                timestamp = System.currentTimeMillis(),
+                deviceModel = android.os.Build.MODEL,
+                averageBpm = if (ppiHistory.isNotEmpty()) (60000 / ppiHistory.average()).toInt() else 0,
+                averageSpo2 = _uiState.value.spo2,
+                finalRhythmStatus = _uiState.value.rhythmStatus,
+                finalRmssd = td.rmssd,
+                finalShannonEntropyBits = td.shannonEntropyBits,
+                finalSampleEntropy = td.sampleEntropy,
+                finalCvPercent = td.cv,
+                motionMeanIntensity = td.motionIntensity,
+                samples = ppgBuffer.toList()
+            )
+            viewModelScope.launch {
+                exportService.exportSession(session)
+            }
+        }
+        
+        _uiState.value = _uiState.value.copy(isMeasuring = false)
     }
 
     override fun onFrame(frame: PpgCameraFrame, timestampNs: Long) {
-        val now = System.currentTimeMillis()
-        val latency = if (lastFrameTime > 0) now - lastFrameTime else 0
-        lastFrameTime = now
+        val timestamp = timestampNs
+        val isMoving = motionDetector.isMoving
 
-        // 1. Extraer PpgFrame
-        val ppgFrame = PpgFrame(
-            timestampNs = timestampNs,
-            fpsEstimate = cameraController.actualFps.toFloat(),
-            avgRed = frame.redSrgb,
-            avgGreen = frame.greenSrgb,
-            avgBlue = frame.blueSrgb,
-            redDc = frame.redSrgb,
-            greenDc = frame.greenSrgb,
-            blueDc = frame.blueSrgb,
-            redAc = 0f, greenAc = 0f, blueAc = 0f,
-            saturationRatio = if (frame.redSrgb > 250) 1f else 0f,
-            darknessRatio = if (frame.redSrgb < 10) 1f else 0f,
-            skinLikelihood = 1f,
-            redDominance = frame.redSrgb / frame.greenSrgb.coerceAtLeast(1f),
-            greenPulseCandidate = frame.greenSrgb,
-            textureScore = 1f, motionScore = 0f,
-            rawOpticalSignal = frame.greenSrgb,
-            normalizedSignal = frame.greenSrgb / 255f
-        )
-
-        // 2. Filtrado y Buffering
-        signalBuffer.push(ppgFrame)
-        val filtered = bandpass.filter(ppgFrame.rawOpticalSignal)
-
-        // 3. Clasificación (REGLA DE ORO)
-        val state = classifier.classify(ppgFrame)
-        val isPhysiological = state == PpgValidityState.PPG_VALID
-
-        var currentBpm = 0
-        var currentSpo2 = 0f
-        var currentSpo2Status = "BUSCANDO..."
-        var rhythmStatus = RhythmAnalysisEngine.RhythmStatus.CALIBRATING
-        var isPeak = false
-        var confidence = 0f
-
-        if (isPhysiological) {
-            // Detección de picos solo si es válido
-            val peak = peakDetector.process(filtered, timestampNs)
-            val fused = bpmEstimator.estimate(peak, 0.8f, timestampNs)
-
-            if (fused != null) {
-                isPeak = true
-                confidence = fused.confidence.toFloat()
-                haptics.trigger()
-                
-                val rrMs = fused.rrMs?.toLong() ?: 0L
-                if (rrMs > 0) {
-                    val rhythm = rhythmAnalyzer.addIntervalDetailed(rrMs, timestampNs)
-                    currentBpm = rhythm.bpm
-                    rhythmStatus = rhythm.status
-                }
-            } else {
-                currentBpm = bpmEstimator.getAverageBpm()
+        if (darkCollectionRemaining != null && darkCollectionRemaining!! > 0) {
+            darkScratchR.add(Radiometry.srgbByteToLinear(frame.redSrgb))
+            darkScratchG.add(Radiometry.srgbByteToLinear(frame.greenSrgb))
+            darkScratchB.add(Radiometry.srgbByteToLinear(frame.blueSrgb))
+            darkCollectionRemaining = darkCollectionRemaining!! - 1
+            if (darkCollectionRemaining == 0) {
+                darkOffsetLinearR = medianLinear(darkScratchR)
+                darkOffsetLinearG = medianLinear(darkScratchG)
+                darkOffsetLinearB = medianLinear(darkScratchB)
+                darkCalibrationReadyFlag = true
+                darkCollectionRemaining = null
+                odGreenExtractor.reset()
+                detrender.reset()
+                butterworth.reset()
+                smoother.reset()
+                physiologyClassifier.reset()
             }
-
-            val spo2Result = spo2Estimator.process(frame.redSrgb, frame.greenSrgb, frame.blueSrgb, 0.8f)
-            currentSpo2 = spo2Result.spo2
-            currentSpo2Status = spo2Result.status
         }
 
-        // 4. Muestra UI
+        val r01 = Radiometry.linear01WithDark(frame.redSrgb, darkOffsetLinearR)
+        val g01 = Radiometry.linear01WithDark(frame.greenSrgb, darkOffsetLinearG)
+        val b01 = Radiometry.linear01WithDark(frame.blueSrgb, darkOffsetLinearB)
+
+        val rLin = r01 * 255f
+        val gLin = g01 * 255f
+        val bLin = b01 * 255f
+        pushOpticalWindow(rLin, gLin, bLin)
+
+        // Integración con ForensicPpgProcessor (Fuente única de verdad)
+        val forensicResult = forensicProcessor.processFrame(timestamp, frame.redSrgb.toFloat(), frame.greenSrgb.toFloat(), frame.blueSrgb.toFloat())
+
+        // 4. Clinical Metrics (SOLO SI SEÑAL FORENSE ES VÁLIDA)
+        var currentBpm = if (forensicResult.heartRate > 0) forensicResult.heartRate.toInt() else 0
+        var currentSpo2Status = if (forensicResult.fingerPresent) "PROCESANDO SEÑAL..." else "COLOQUE DEDO"
+
+        // UI pública solo si pasa PublicationGate (forensicResult.waveformQuality != POOR)
+        val publicationGate = forensicResult.waveformQuality != ForensicPpgProcessor.WaveformQuality.POOR
+
+        // Actualizar UI
+        _uiState.value = _uiState.value.copy(
+            bpm = if (publicationGate) currentBpm else 0,
+            isMeasuring = true,
+            fingerPresent = forensicResult.fingerPresent,
+            signalValid = publicationGate,
+            ppgSamples = forensicResult.samples.map { 
+                PPGSample(it.timestampNs, it.redChannel, it.greenChannel, it.blueChannel, it.filteredValue, it.systolicPeak, it.signalQuality) 
+            }
+        )
+
+                frame = frame,
+                isMoving = isMoving
+            )
+        } else {
+            PpgValidityState.NO_FINGER_DETECTED
+        }
+
+        val perfusionProxy = ((kotlin.math.abs(filtered) + 1e-3f) / frame.redSrgb.coerceAtLeast(1f)) * 100f
+        val sqiFrame = if (validityState == PpgValidityState.PPG_VALID) {
+            SignalQualityIndex.fromOpticalStreams(
+                redHistory = opticalRedWindow,
+                greenHistory = opticalGreenWindow,
+                blueHistory = opticalBlueWindow,
+                motionIntensity = motionDetector.motionIntensity,
+                perfusionRatio = perfusionProxy.coerceIn(0.01f, 20f)
+            )
+        } else 0f
+
+        // 4. Clinical Metrics (SOLO SI SEÑAL FORENSE ES VÁLIDA)
+        var currentBpm = _uiState.value.bpm
+        var currentRhythm = _uiState.value.rhythmStatus
+        var currentRmssd = _uiState.value.technicalData.rmssd
+        var currentPnn50 = _uiState.value.technicalData.pnn50
+        var currentCv = _uiState.value.technicalData.cv
+        var currentH = _uiState.value.technicalData.shannonEntropyBits
+        var currentSampEn = _uiState.value.technicalData.sampleEntropy
+        var currentSpo2 = _uiState.value.spo2
+        var currentSpo2Status = when {
+            !fingerDetection.fingerPresent -> "COLOQUE DEDO"
+            !fingerDetection.signalValid -> "SEÑAL INVÁLIDA"
+            fingerDetection.signalQuality == SignalQuality.EXCELLENT -> "SEÑAL EXCELENTE"
+            fingerDetection.signalQuality == SignalQuality.GOOD -> "BUENA SEÑAL"
+            fingerDetection.signalQuality == SignalQuality.ACCEPTABLE -> "SEÑAL ACEPTABLE"
+            fingerDetection.signalQuality == SignalQuality.POOR -> "SEÑAL DÉBIL"
+            else -> "MEJORORAR CONTACTO"
+        }
+
+        // 5. Advanced Peak Detection & Fusion (SOLO CON SEÑAL FORENSE VÁLIDA)
+        var isPeak = false
+        var fusedBeat: HeartRateFusion.FusedBeat? = null
+        var classifiedBeat: BeatClassifier.ClassifiedBeat? = null
+        var arrhythmiaEvent: ArrhythmiaScreening.ArrhythmiaEvent? = null
+        
+        if (validityState == PpgValidityState.PPG_VALID && fingerDetection.signalValid) {
+            // Detectar picos con ambos métodos
+            val elgendiPeak = elgendiDetector.process(filtered, timestamp)
+            val derivativePeak = derivativeDetector.process(filtered, timestamp)
+            
+            // Fusionar detecciones
+            fusedBeat = heartRateFusion.fuseDetections(elgendiPeak, derivativePeak, sqiFrame, timestamp)
+            
+            if (fusedBeat != null) {
+                isPeak = true
+                feedbackController.trigger()
+                
+                // Clasificar latido
+                classifiedBeat = beatClassifier.classifyBeat(fusedBeat, sqiFrame)
+                
+                // Screening de arritmias
+                arrhythmiaEvent = arrhythmiaScreening.screenForArrhythmias(classifiedBeat)
+                
+                // Actualizar BPM con datos fusionados
+                fusedBeat.bpmInstant?.let { bpm ->
+                    currentBpm = bpm.toInt()
+                }
+                
+                // Actualizar análisis de morfología con pico detectado
+                morphologyAnalyzer.analyzeWaveformPoint(
+                    filteredValue = filtered,
+                    timestampNs = timestamp,
+                    isSystolicPeak = true,
+                    isValley = false,
+                    hasDicroticNotch = false
+                )
+            }
+        } else {
+            // Resetear detectores si señal no es válida
+            elgendiDetector.reset()
+            derivativeDetector.reset()
+            heartRateFusion.reset()
+            morphologyAnalyzer.reset()
+        }
+
+        if (validityState == PpgValidityState.PPG_VALID) {
+            if (isPeak) {
+                if (lastPeakTime != 0L) {
+                    val ppiNs = timestamp - lastPeakTime
+                    val ppiMs = ppiNs / 1_000_000L
+                    if (ppiMs in 300..2000) {
+                        ppiHistory.add(ppiMs)
+                        if (ppiHistory.size > 60) ppiHistory.removeAt(0)
+
+                        val detailed = rhythmEngine.addIntervalDetailed(ppiMs, timestamp)
+                        currentBpm = detailed.bpm
+                        currentRhythm = detailed.status
+                        currentRmssd = detailed.rmssd
+                        currentPnn50 = detailed.pnn50
+                        currentCv = detailed.cv
+                        currentH = detailed.shannonEntropyBits
+                        currentSampEn = detailed.sampleEntropy
+                    }
+                }
+                lastPeakTime = timestamp
+            }
+
+            val spo2Result = spo2Estimator.process(rLin, gLin, bLin, sqiFrame)
+            currentSpo2 = spo2Result.spo2
+            currentSpo2Status = spo2Result.status
+        } else {
+            // Reset filters and metrics based on severity
+            if (validityState == PpgValidityState.NO_PPG_PHYSIOLOGICAL_SIGNAL || 
+                validityState == PpgValidityState.LOW_PERFUSION) {
+                currentBpm = 0
+                currentSpo2 = 0f
+                currentRmssd = 0.0
+                currentPnn50 = 0.0
+                currentCv = 0.0
+                currentH = 0.0
+                currentSampEn = null
+                currentSpo2Status = if (validityState == PpgValidityState.LOW_PERFUSION) "COLOQUE EL DEDO" else "SIN SEÑAL FISIOLÓGICA"
+                ppiHistory.clear()
+                rhythmEngine.reset()
+                detrender.reset()
+                butterworth.reset()
+                smoother.reset()
+                peakDetector.reset()
+                odGreenExtractor.reset()
+            }
+        }
+
+        // 5. Update Waveform Buffer and Beat History
         val sample = PPGSample(
-            timestamp = timestampNs,
+            timestamp = timestamp,
             redMean = frame.redSrgb,
             greenMean = frame.greenSrgb,
             blueMean = frame.blueSrgb,
-            filteredValue = if (state == PpgValidityState.PPG_VALID || state == PpgValidityState.PPG_CANDIDATE) filtered else 0f,
+            filteredValue = filtered,
             isPeak = isPeak,
-            sqi = if (isPhysiological) 0.8f else 0.1f,
-            fingerDetected = state != PpgValidityState.NO_PPG_PHYSIOLOGICAL_SIGNAL,
-            confidence = confidence
+            sqi = sqiFrame
         )
 
-        ppgSampleHistory.add(sample)
-        if (ppgSampleHistory.size > maxHistorySize) ppgSampleHistory.removeAt(0)
+        ppgBuffer.add(sample)
+        if (ppgBuffer.size > maxBufferSize) ppgBuffer.removeAt(0)
+        
+        // Mantener historial de beats clasificados y eventos
+        val currentClassifiedBeats = _uiState.value.classifiedBeats.toMutableList()
+        val currentArrhythmiaEvents = _uiState.value.arrhythmiaEvents.toMutableList()
+        
+        classifiedBeat?.let { 
+            currentClassifiedBeats.add(it)
+            if (currentClassifiedBeats.size > 50) currentClassifiedBeats.removeAt(0)
+        }
+        
+        arrhythmiaEvent?.let {
+            currentArrhythmiaEvents.add(it)
+            if (currentArrhythmiaEvents.size > 20) currentArrhythmiaEvents.removeAt(0)
+        }
 
-        // 5. Emitir Estado Atómico
+        // 6. Technical / FPS
+        var currentFps = _uiState.value.technicalData.fps
+        frameCount++
+        val now = System.currentTimeMillis()
+        if (now - lastFpsTimestamp >= 1000) {
+            currentFps = frameCount
+            frameCount = 0
+            lastFpsTimestamp = now
+            val fs = currentFps.toFloat().coerceAtLeast(12f).coerceAtMost(120f)
+            butterworth.updateCoefficients(fs)
+            peakDetector.updateSampleRate(fs)
+        }
+
+        // 7. Atomic State Update con datos forenses
         _uiState.value = _uiState.value.copy(
-            validityState = state,
-            ppgSamples = ppgSampleHistory.toList(),
             bpm = currentBpm,
             spo2 = currentSpo2,
             spo2Status = currentSpo2Status,
-            rhythmStatus = rhythmStatus,
-            fps = cameraController.actualFps,
-            latencyMs = latency,
-            signalValid = isPhysiological,
-            fingerPresent = sample.fingerDetected
+            validityState = validityState,
+            rhythmStatus = currentRhythm,
+            darkCalibrationCollecting = darkCollectionRemaining != null,
+            darkCalibrationReady = darkCalibrationReadyFlag,
+            ppgSamples = ppgBuffer.toList(),
+            classifiedBeats = currentClassifiedBeats.toList(),
+            arrhythmiaEvents = currentArrhythmiaEvents.toList(),
+            technicalData = _uiState.value.technicalData.copy(
+                fps = currentFps,
+                rmssd = currentRmssd,
+                pnn50 = currentPnn50,
+                cv = currentCv,
+                shannonEntropyBits = currentH,
+                sampleEntropy = currentSampEn,
+                signalConfidence = fingerDetection.confidence,
+                redDC = frame.redSrgb,
+                greenDC = frame.greenSrgb,
+                blueDC = frame.blueSrgb,
+                motionIntensity = motionDetector.motionIntensity,
+                quadrantBalanceRed = frame.quadrantBalanceRed,
+                blockLumaStd = calculateBlockLumaStd(frame),
+                interBlockGradient = calculateInterBlockGradient(frame),
+                odPulseScaled = odPulseScaled,
+                odBaselineGreen01 = calculateOdBaseline(frame, odGreenExtractor)
+            ),
+            // Nuevos campos forenses
+            fingerPresent = fingerDetection.fingerPresent,
+            signalQuality = fingerDetection.signalQuality,
+            signalValid = fingerDetection.signalValid,
+            waveformType = morphologyResult.waveType,
+            abnormalities = morphologyResult.abnormalities,
+            detectionConfidence = fingerDetection.confidence
         )
+    }
+    
+    /**
+     * Calcula la desviación estándar de luminancia por bloques
+     */
+    private fun calculateBlockLumaStd(frame: PpgCameraFrame): Float {
+        // Usar la desviación estándar de los valores de cuadrantes como proxy
+        val quadrants = listOf(
+            frame.quadrantBalanceRed,
+            frame.greenSrgb,
+            frame.blueSrgb
+        )
+        val mean = quadrants.average()
+        val variance = quadrants.map { (it - mean) * (it - mean) }.average()
+        return kotlin.math.sqrt(variance).toFloat()
+    }
+    
+    /**
+     * Calcula el gradiente entre bloques adyacentes
+     */
+    private fun calculateInterBlockGradient(frame: PpgCameraFrame): Float {
+        // Calcular diferencias entre canales como proxy de gradiente
+        val redGreenDiff = kotlin.math.abs(frame.redSrgb - frame.greenSrgb)
+        val greenBlueDiff = kotlin.math.abs(frame.greenSrgb - frame.blueSrgb)
+        return (redGreenDiff + greenBlueDiff) / 2f
+    }
+    
+    /**
+     * Calcula la línea base de densidad óptica
+     */
+    private fun calculateOdBaseline(frame: PpgCameraFrame, extractor: Radiometry.OpticalDensityGreen): Float {
+        return frame.greenSrgb.coerceAtLeast(1e-7f)
+    }
+    
+    private fun pushOpticalWindow(red: Float, green: Float, blue: Float) {
+        opticalRedWindow.add(red)
+        opticalGreenWindow.add(green)
+        opticalBlueWindow.add(blue)
+        while (opticalRedWindow.size > opticalWindowCap) opticalRedWindow.removeAt(0)
+        while (opticalGreenWindow.size > opticalWindowCap) opticalGreenWindow.removeAt(0)
+        while (opticalBlueWindow.size > opticalWindowCap) opticalBlueWindow.removeAt(0)
+    }
+    
+    private fun medianLinear(samples: MutableList<Float>): Float {
+        if (samples.isEmpty()) return 0f
+        val sorted = samples.sorted()
+        val n = sorted.size
+        val m = n / 2
+        return if (n % 2 == 1) sorted[m] else (sorted[m - 1] + sorted[m]) * 0.5f
     }
 
     override fun onCleared() {
         super.onCleared()
         cameraController.stop()
-        haptics.release()
+        motionSensorController.stop()
+        feedbackController.release()
     }
 
     fun toggleBeep(enabled: Boolean) {
-        haptics.beepEnabled = enabled
+        feedbackController.beepEnabled = enabled
         _uiState.value = _uiState.value.copy(beepEnabled = enabled)
     }
 
     fun toggleVibration(enabled: Boolean) {
-        haptics.vibrationEnabled = enabled
+        feedbackController.vibrationEnabled = enabled
         _uiState.value = _uiState.value.copy(vibrationEnabled = enabled)
+    }
+    
+    fun toggleCalibrationScreen(show: Boolean) {
+        _uiState.value = _uiState.value.copy(showCalibrationScreen = show)
+    }
+    
+    fun startDarkFrameCalibration() {
+        darkScratchR.clear()
+        darkScratchG.clear()
+        darkScratchB.clear()
+        darkCollectionRemaining = 72  // 72 frames para calibración
+        darkCalibrationReadyFlag = false
+    }
+    
+    fun getDetectionStats(): DetectionStats {
+        return DetectionStats(
+            elgendiStats = elgendiDetector.getStats(),
+            derivativeStats = derivativeDetector.getStats(),
+            fusionStats = heartRateFusion.getFusionStats(),
+            beatClassifierStats = beatClassifier.getClassificationStats(),
+            arrhythmiaStats = arrhythmiaScreening.getRecentEventsSummary()
+        )
     }
 }
