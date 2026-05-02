@@ -112,13 +112,24 @@ export class Spo2Estimator {
     if (clipHighRatio > 0.18) return { spo2: null, confidence: 0, ratioOfRatios: r, redAcDc: rRatio, blueAcDc: bRatio, greenAcDc: gRatio, reason: 'clipping' }
     if (sqi < 0.45) return { spo2: null, confidence: 0, ratioOfRatios: r, redAcDc: rRatio, blueAcDc: bRatio, greenAcDc: gRatio, reason: 'sqi_bajo' }
 
-    if (!calibration) {
-      return { spo2: null, confidence: 0, ratioOfRatios: r, redAcDc: rRatio, blueAcDc: bRatio, greenAcDc: gRatio, reason: 'sin_calibracion' }
-    }
-    const raw = calibration.coefficientA - calibration.coefficientB * r
+    // Estimación provisional con fórmula empírica estándar. Sin
+    // calibración clínica, la confidence nunca supera 0.5 y la UI muestra
+    // el disclaimer "estimación provisional — no clínica".
+    const A = calibration?.coefficientA ?? 110
+    const B = calibration?.coefficientB ?? 25
+    const raw = A - B * r
     const spo2 = Math.min(100, Math.max(70, raw))
-    const confidence = Math.min(1, Math.max(0, sqi * (1 - Math.min(1, Math.max(0, motionScore)))))
-    return { spo2, confidence, ratioOfRatios: r, redAcDc: rRatio, blueAcDc: bRatio, greenAcDc: gRatio, reason: 'ok' }
+    const confBase = sqi * (1 - Math.min(1, Math.max(0, motionScore)))
+    const confidence = Math.min(1, Math.max(0, calibration ? confBase : Math.min(0.5, confBase)))
+    return {
+      spo2,
+      confidence,
+      ratioOfRatios: r,
+      redAcDc: rRatio,
+      blueAcDc: bRatio,
+      greenAcDc: gRatio,
+      reason: calibration ? 'ok' : 'provisional_no_clinico'
+    }
   }
 
   private pp(buf: Float64Array, dcEma: number): [number, number] {

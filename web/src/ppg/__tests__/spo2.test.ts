@@ -31,10 +31,13 @@ const cal: CalibrationProfile = {
 }
 
 describe('Spo2Estimator', () => {
-  it('devuelve null sin calibración', () => {
+  it('sin calibración devuelve estimación provisional con confianza <= 0.5', () => {
     const e = new Spo2Estimator(30)
     feed(e, 30, 10)
-    expect(e.estimate(null, 1.5, 0.8, 0.05, 0.01).spo2).toBeNull()
+    const r = e.estimate(null, 1.5, 0.8, 0.05, 0.01)
+    expect(r.spo2).not.toBeNull()
+    expect(r.reason).toBe('provisional_no_clinico')
+    expect(r.confidence).toBeLessThanOrEqual(0.5)
   })
 
   it('devuelve número con calibración y señal aceptable', () => {
