@@ -19,5 +19,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "JULYLOVE"
+rootProject.name = "ForensicPPG"
 include(":app")

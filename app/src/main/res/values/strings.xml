@@ -1,4 +1,51 @@
-<?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">JULYLOVE Medical</string>
+    <string name="app_name">Monitor PPG Forense</string>
+
+    <!-- Permisos -->
+    <string name="permission_camera_rationale">Se requiere acceso a la cámara para capturar la señal PPG del dedo índice mediante la cámara trasera y el flash.</string>
+    <string name="permission_camera_denied">Sin permiso de cámara no es posible realizar la medición.</string>
+    <string name="grant_permission">Conceder permiso</string>
+
+    <!-- Instrucciones UI -->
+    <string name="ui_instruction_place_finger">Cubra la cámara y el flash con el dedo índice</string>
+    <string name="ui_instruction_no_motion">Mantenga la mano inmóvil y apoyada</string>
+    <string name="ui_instruction_waiting">Esperando señal estable…</string>
+    <string name="ui_instruction_warmup">Calentando sensor óptico — aguarde</string>
+
+    <!-- Botones -->
+    <string name="action_start">INICIAR</string>
+    <string name="action_stop">DETENER</string>
+    <string name="action_calibrate">CALIBRAR</string>
+    <string name="action_export">EXPORTAR</string>
+    <string name="action_diag">DIAGNÓSTICO</string>
+    <string name="action_close">CERRAR</string>
+
+    <!-- Estados -->
+    <string name="state_no_contact">SIN CONTACTO</string>
+    <string name="state_partial">CONTACTO PARCIAL</string>
+    <string name="state_warmup">CALENTAMIENTO</string>
+    <string name="state_measuring">MIDIENDO</string>
+    <string name="state_degraded">SEÑAL DEGRADADA</string>
+    <string name="state_invalid">SIN LECTURA VÁLIDA</string>
+    <string name="state_calibration_required">CALIBRACIÓN REQUERIDA</string>
+
+    <!-- Mensajes clínicos -->
+    <string name="msg_no_contact">Coloque el dedo sobre la cámara trasera</string>
+    <string name="msg_motion">Movimiento excesivo — inmovilice el dedo</string>
+    <string name="msg_clipping">Saturación óptica — reduzca la presión</string>
+    <string name="msg_low_perfusion">Baja perfusión — caliente el dedo</string>
+    <string name="msg_requires_calibration">SpO₂ requiere calibración con oxímetro de referencia</string>
+    <string name="msg_fps_low">FPS bajo — degradando análisis</string>
+
+    <!-- Tiles -->
+    <string name="tile_bpm">BPM</string>
+    <string name="tile_spo2">SpO₂</string>
+    <string name="tile_sqi">SQI</string>
+    <string name="tile_pi">PI</string>
+    <string name="tile_rr">RR</string>
+    <string name="tile_beats">LATIDOS</string>
+    <string name="tile_abnormal">ANÓMALOS</string>
+    <string name="tile_fps">FPS</string>
+    <string name="tile_motion">MOVIMIENTO</string>
+    <string name="tile_pressure">PRESIÓN</string>
 </resources>

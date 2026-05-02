@@ -2,6 +2,8 @@
 .gradle/
 app/build/
 build/
+.idea/
+.kotlin/
 
 local.properties
 
@@ -11,8 +13,8 @@ local.properties
 *.jks
 *.keystore
 
-# Web local
-web/node_modules/
-web/dist/
+# JVM crash logs
+hs_err_pid*.log
+replay_pid*.log
 
 .DS_Store

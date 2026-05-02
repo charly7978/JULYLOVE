@@ -1,0 +1,7 @@
+<resources>
+    <color name="forensic_bg">#FF000000</color>
+    <color name="forensic_grid">#FF0E2416</color>
+    <color name="forensic_wave">#FF22FFAA</color>
+    <color name="forensic_warn">#FFFFAA22</color>
+    <color name="forensic_alert">#FFFF3050</color>
+</resources>
