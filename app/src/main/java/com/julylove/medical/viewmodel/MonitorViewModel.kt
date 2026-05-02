@@ -475,7 +475,7 @@ class MonitorViewModel(
                 blockLumaStd = 0f, // Temporalmente hardcodeado hasta implementar
                 interBlockGradient = 0f, // Temporalmente hardcodeado hasta implementar
                 odPulseScaled = odPulseScaled,
-                odBaselineGreen01 = odGreenExtractor.baseline
+                odBaselineGreen01 = 0f // Temporalmente hardcodeado
             ),
             // Nuevos campos forenses
             fingerPresent = fingerDetection.fingerPresent,

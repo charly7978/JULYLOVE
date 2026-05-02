@@ -181,7 +181,7 @@ class AcademicSignalQualityValidator {
         
         if (std == 0.0) return 0f
         
-        val fourthMoment = signal.map { ((it - mean) / std).pow(4) }.average()
+        val fourthMoment = signal.map { ((it - mean) / std).pow(4.0) }.average()
         
         return (fourthMoment - 3.0).toFloat() // Exceso de kurtosis
     }

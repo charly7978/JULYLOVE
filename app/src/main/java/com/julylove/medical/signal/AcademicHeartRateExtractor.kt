@@ -147,8 +147,8 @@ class AcademicHeartRateExtractor {
         
         groupedCandidates.forEach { group ->
             if (group.size >= 2) { // Consenso de al menos 2 algoritmos
-                val weightedTimestamp = group.sumOf { it.timestamp * it.weight } / group.sumOf { it.weight }
-                val weightedProminence = group.sumOf { it.prominence * it.weight } / group.sumOf { it.weight }
+                val weightedTimestamp = group.sumOf { (it.timestamp * it.weight).toDouble() } / group.sumOf { it.weight.toDouble() }
+                val weightedProminence = group.sumOf { (it.prominence * it.weight).toDouble() } / group.sumOf { it.weight.toDouble() }
                 val consensus = group.size.toFloat() / 3f // 3 algoritmos totales
                 
                 fusedBeats.add(HeartBeat(
@@ -264,7 +264,7 @@ class AcademicHeartRateExtractor {
         if (rrIntervals.isEmpty()) return 0f
         
         // Calcular BPM usando promedio de intervalos RR
-        val avgRR = rrIntervals.average()
+        val avgRR = rrIntervals.sumOf { it.toDouble() } / rrIntervals.size
         val bpmFromRR = 60000.0 / avgRR
         
         // Validar rango fisiológico

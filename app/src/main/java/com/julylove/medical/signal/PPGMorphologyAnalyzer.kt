@@ -424,7 +424,7 @@ class PPGMorphologyAnalyzer {
         
         val mean = intervals.average()
         val variance = intervals.sumOf { (it - mean).pow(2) } / intervals.size
-        val cv = variance.sqrt() / mean
+        val cv = kotlin.math.sqrt(variance) / mean
         
         // Regularidad = 1 - coeficiente de variación
         return (1f - cv.toFloat()).coerceIn(0f, 1f)
