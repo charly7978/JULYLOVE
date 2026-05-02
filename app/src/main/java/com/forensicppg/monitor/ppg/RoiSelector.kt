@@ -1,9 +1,9 @@
 package com.forensicppg.monitor.ppg
 
 /**
- * Selector de ROI simple pero robusto: usa el 60% central del frame como ROI
- * primario y permite subdivisión en tiles para la evaluación por tile. No
- * genera ROI aleatorio: su salida depende sólo del tamaño del frame.
+ * Selector de ROI centrado sobre el fotograma: la posición física esperada es que
+ * la yema cubra lente + flash traseros; geométricamente coincide con el centro
+ * del campo en la mayoría de dispositivos móviles compactos.
  */
 class RoiSelector(
     private val centerFraction: Double = 0.6
@@ -17,17 +17,5 @@ class RoiSelector(
         val x = ((frameWidth - w) / 2).coerceAtLeast(0)
         val y = ((frameHeight - h) / 2).coerceAtLeast(0)
         return Roi(x, y, w, h)
-    }
-
-    fun splitIntoTiles(roi: Roi, tilesPerSide: Int): List<Roi> {
-        val out = ArrayList<Roi>(tilesPerSide * tilesPerSide)
-        val tileW = roi.width / tilesPerSide
-        val tileH = roi.height / tilesPerSide
-        for (ty in 0 until tilesPerSide) {
-            for (tx in 0 until tilesPerSide) {
-                out += Roi(roi.x + tx * tileW, roi.y + ty * tileH, tileW, tileH)
-            }
-        }
-        return out
     }
 }

@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -18,6 +19,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -50,6 +52,7 @@ fun MonitorScreen(
     val vibOn by viewModel.feedbackVibrationOn.collectAsState()
 
     var showDiagnostics by remember { mutableStateOf(false) }
+    var showFingerPlacementGuide by remember { mutableStateOf(true) }
 
     Column(
         modifier = Modifier
@@ -71,13 +74,41 @@ fun MonitorScreen(
                     .fillMaxHeight(),
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                PpgWaveformCanvas(
-                    sampleFlow = viewModel.samples,
-                    beatFlow = viewModel.beats,
+                Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f)
-                )
+                ) {
+                    PpgWaveformCanvas(
+                        sampleFlow = viewModel.samples,
+                        beatFlow = viewModel.beats,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                    if (showFingerPlacementGuide) {
+                        FingerPlacementGuide(
+                            onDismissRequest = { showFingerPlacementGuide = false },
+                            modifier = Modifier
+                                .align(Alignment.TopCenter)
+                                .fillMaxWidth()
+                                .padding(horizontal = 8.dp)
+                        )
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(top = 4.dp, end = 4.dp)
+                        ) {
+                            TextButton(onClick = { showFingerPlacementGuide = true }) {
+                                Text(
+                                    "Guía dedo",
+                                    color = Color(0xFF22FFAA),
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 10.sp
+                                )
+                            }
+                        }
+                    }
+                }
                 SignalQualityPanel(reading, modifier = Modifier.fillMaxWidth())
             }
             Spacer(Modifier.fillMaxWidth(0.01f))

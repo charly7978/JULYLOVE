@@ -2,6 +2,7 @@ package com.forensicppg.monitor.camera
 
 import android.hardware.camera2.CameraMetadata
 import android.hardware.camera2.CaptureRequest
+import com.forensicppg.monitor.ppg.PpgAcquisitionTuning
 
 /**
  * Aplica control manual de exposición / ISO / frame duration y bloquea AE/AWB
@@ -32,7 +33,7 @@ object ManualExposureController {
 
         val fps = targetFps.coerceAtLeast(15)
         val maxFrameDurationForFps = 1_000_000_000L / fps
-        val desiredExposure = 8_000_000L
+        val desiredExposure = PpgAcquisitionTuning.MANUAL_DESIRED_EXPOSURE_NS
         val clampedExposure = desiredExposure.coerceIn(minExp, minOf(maxExp, maxFrameDurationForFps - 500_000L))
         val desiredIso = minOf(maxIso, maxOf(minIso, (caps.maxAnalogSensitivity ?: minIso) / 2))
         val frameDuration = maxFrameDurationForFps.coerceAtLeast(clampedExposure + 500_000L)

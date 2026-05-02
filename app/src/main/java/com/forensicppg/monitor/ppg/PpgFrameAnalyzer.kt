@@ -20,13 +20,13 @@ class PpgFrameAnalyzer(
     private var prevMeanGreen = 0.0
 
     /** Promedios de canal recientes (~6 s máximo a ~30 FPS). */
-    private val rb = Rolling(200)
-    private val gb = Rolling(200)
-    private val bb = Rolling(200)
+    private val rb = Rolling(PpgAcquisitionTuning.CHANNEL_ROLLING_CAPACITY)
+    private val gb = Rolling(PpgAcquisitionTuning.CHANNEL_ROLLING_CAPACITY)
+    private val bb = Rolling(PpgAcquisitionTuning.CHANNEL_ROLLING_CAPACITY)
 
-    private val motionSmooth = AlphaSmoother(0.92)
+    private val motionSmooth = AlphaSmoother(PpgAcquisitionTuning.MOTION_EMA_ALPHA)
     private var stableRoiFrames = 0
-    private var roiFractionAdaptive: Double = 0.56
+    private var roiFractionAdaptive: Double = PpgAcquisitionTuning.ROI_FRACTION_LOOSE
 
     /**
      * [image]: YUV_420_888 cerrado externamente después.
@@ -73,7 +73,7 @@ class PpgFrameAnalyzer(
         var sumY = 0L
         var sumY2 = 0L
 
-        val step = if (roi.width > 384) 2 else 1
+        val step = if (roi.width > PpgAcquisitionTuning.ROI_SUBSAMPLE_WIDE_THRESHOLD_PX) 2 else 1
         var cnt = 0L
         var y = roi.y
         while (y < roi.y + roi.height) {
@@ -156,7 +156,10 @@ class PpgFrameAnalyzer(
         val greenPulsatility = gb.coefficientVariation()
         val blueStable = bb.stabilityScore()
 
-        val perfusionGreenPct = min(120.0, gAcDc * 120.0)
+        val perfusionGreenPct = kotlin.math.min(
+            PpgAcquisitionTuning.GREEN_PERFUSION_SCALE,
+            gAcDc * PpgAcquisitionTuning.GREEN_PERFUSION_SCALE
+        )
 
         val roiStats = RoiChannelStats(
             roiLeft = roi.x,
@@ -203,8 +206,13 @@ class PpgFrameAnalyzer(
 
     private fun updateAdaptiveRoiFraction() {
         val m = motionSmooth.value
-        if (m < 0.038) stableRoiFrames++ else stableRoiFrames = 0
-        roiFractionAdaptive = if (stableRoiFrames > 40) 0.48 else 0.62
+        if (m < PpgAcquisitionTuning.MOTION_STABLE_GATE) stableRoiFrames++ else stableRoiFrames = 0
+        roiFractionAdaptive =
+            if (stableRoiFrames > PpgAcquisitionTuning.MOTION_STABLE_FRAMES_NEED) {
+                PpgAcquisitionTuning.ROI_FRACTION_TIGHT
+            } else {
+                PpgAcquisitionTuning.ROI_FRACTION_LOOSE
+            }
         roiFractionAdaptive = roiFractionAdaptive.coerceIn(0.44, 0.66)
     }
 
@@ -287,6 +295,4 @@ class PpgFrameAnalyzer(
         }
     }
 
-    /** min alias */
-    private fun min(a: Double, b: Double) = kotlin.math.min(a, b)
 }

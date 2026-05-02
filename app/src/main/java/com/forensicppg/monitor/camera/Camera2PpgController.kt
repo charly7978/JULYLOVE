@@ -24,6 +24,8 @@ import androidx.core.content.ContextCompat
 import com.forensicppg.monitor.domain.ExposureDiagnostics
 import com.forensicppg.monitor.domain.PpgSample
 import com.forensicppg.monitor.ppg.PpgFrameAnalyzer
+import com.forensicppg.monitor.ppg.PpgAcquisitionTuning.FRAME_DROP_GAP_MULTIPLIER
+import com.forensicppg.monitor.ppg.PpgAcquisitionTuning.IMAGE_READER_MAX_IMAGES
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -40,7 +42,7 @@ class Camera2PpgController(private val context: Context) {
     private val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
     private val analyzer = PpgFrameAnalyzer()
     private val frames = MutableSharedFlow<PpgSample>(
-        replay = 0, extraBufferCapacity = 6, onBufferOverflow = BufferOverflow.DROP_OLDEST
+        replay = 0, extraBufferCapacity = 96, onBufferOverflow = BufferOverflow.DROP_OLDEST
     )
 
     private var bgThread: HandlerThread? = null
@@ -131,45 +133,13 @@ class Camera2PpgController(private val context: Context) {
 
         val size = chooseSize(caps)
         val fpsRange = chooseFpsRange(caps, targetFps)
-        val reader = ImageReader.newInstance(size.width, size.height, ImageFormat.YUV_420_888, 4)
+        val reader = ImageReader.newInstance(
+            size.width,
+            size.height,
+            ImageFormat.YUV_420_888,
+            IMAGE_READER_MAX_IMAGES
+        )
         imageReader = reader
-
-        reader.setOnImageAvailableListener({ ir ->
-            val img = runCatching { ir.acquireLatestImage() }.getOrNull() ?: return@setOnImageAvailableListener
-            try {
-                val ts = img.timestamp
-                prevImageTs?.let { p ->
-                    val gapMs = abs(ts - p) / 1_000_000.0
-                    jitterEmaMs = if (jitterEmaMs == 0.0) gapMs else 0.91 * jitterEmaMs + 0.09 * gapMs
-                    val instFps = 1000.0 / gapMs.coerceAtLeast(1.05)
-                    fpsEmaHz = if (fpsEmaHz == 0.0) instFps else 0.90 * fpsEmaHz + 0.10 * instFps
-                    val nominalMs = nominalFrameNs / 1e6 * 2.85
-                    if (gapMs > nominalMs.coerceAtLeast(45.0)) drops.incrementAndGet()
-                }
-                prevImageTs = ts
-
-                val cfg = activeConfig ?: return@setOnImageAvailableListener
-                val hwNote =
-                    if (!cfg.manualControlApplied) "Control sensor manual incompleto (AE/ISO en modo degradado)"
-                    else null
-
-                val diag = ExposureDiagnostics(
-                    exposureTimeNs = liveExposureNs ?: cfg.manualExposureNs,
-                    iso = liveIso ?: cfg.manualIso,
-                    frameDurationNs = liveFrameDurationNs ?: cfg.manualFrameDurationNs,
-                    torchEnabled = cfg.torchEnabled,
-                    hardwareLimitNote = hwNote,
-                    aeLocked = cfg.aeLocked,
-                    awbLocked = cfg.awbLocked
-                )
-
-                analyzer.analyze(img, SystemClock.elapsedRealtimeNanos(), diag)?.let {
-                    frames.tryEmit(it)
-                }
-            } finally {
-                img.close()
-            }
-        }, bgHandler)
 
         val cam = openCameraSuspended(caps.cameraId)
         device = cam
@@ -209,6 +179,54 @@ class Camera2PpgController(private val context: Context) {
             activeConfig!!.manualFrameDurationNs
                 ?: (1_000_000_000L / fpsChosen).coerceIn(12_500_000L, 166_666_666L)
             ).coerceIn(8_333_333L, 166_666_666L)
+
+        /*
+         * Registrar el listener después de tener [activeConfig] y [nominalFrameNs] coherentes:
+         * nunca usar acquireLatestImage — descarta cuadros y destruye el muestreo temporal del PPG.
+         */
+        reader.setOnImageAvailableListener({ ir ->
+            val cfg = activeConfig ?: return@setOnImageAvailableListener
+            val hwNote =
+                if (!cfg.manualControlApplied) "Control sensor manual incompleto (AE/ISO en modo degradado)"
+                else null
+            while (true) {
+                val img = try {
+                    ir.acquireNextImage()
+                } catch (_: IllegalStateException) {
+                    break
+                } catch (_: Throwable) {
+                    break
+                }
+                try {
+                    val ts = img.timestamp
+                    prevImageTs?.let { p ->
+                        val gapMs = abs(ts - p) / 1_000_000.0
+                        jitterEmaMs = if (jitterEmaMs == 0.0) gapMs else 0.91 * jitterEmaMs + 0.09 * gapMs
+                        val instFps = 1000.0 / gapMs.coerceAtLeast(0.52)
+                        fpsEmaHz = if (fpsEmaHz == 0.0) instFps else 0.90 * fpsEmaHz + 0.10 * instFps
+                        val nominalMs = nominalFrameNs / 1_000_000.0 * FRAME_DROP_GAP_MULTIPLIER
+                        if (gapMs > nominalMs.coerceAtLeast(18.5)) drops.incrementAndGet()
+                    }
+                    prevImageTs = ts
+
+                    val diag = ExposureDiagnostics(
+                        exposureTimeNs = liveExposureNs ?: cfg.manualExposureNs,
+                        iso = liveIso ?: cfg.manualIso,
+                        frameDurationNs = liveFrameDurationNs ?: cfg.manualFrameDurationNs,
+                        torchEnabled = cfg.torchEnabled,
+                        hardwareLimitNote = hwNote,
+                        aeLocked = cfg.aeLocked,
+                        awbLocked = cfg.awbLocked
+                    )
+
+                    analyzer.analyze(img, SystemClock.elapsedRealtimeNanos(), diag)?.let {
+                        frames.tryEmit(it)
+                    }
+                } finally {
+                    img.close()
+                }
+            }
+        }, bgHandler)
 
         session.setRepeatingRequest(
             builder.build(),
