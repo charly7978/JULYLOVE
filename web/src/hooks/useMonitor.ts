@@ -41,8 +41,9 @@ export interface MonitorApi {
   clearCalibration(): void
 }
 
-const SAMPLE_BUFFER_LIMIT = 1500
+const SAMPLE_BUFFER_LIMIT = 900
 const BEAT_BUFFER_LIMIT = 80
+const PUBLISH_THROTTLE_MS = 50
 
 export function useMonitor(): MonitorApi {
   const cameraRef = useRef<CameraController | null>(null)
@@ -52,6 +53,8 @@ export function useMonitor(): MonitorApi {
   const beatsRef = useRef<BeatEvent[]>([])
   const pendingRef = useRef<CalibrationPoint[]>([])
   const calibrationMgr = useMemo(() => new DeviceCalibrationManager(), [])
+  const lastPublishRef = useRef(0)
+  const calibrationRef = useRef<CalibrationProfile | null>(null)
 
   const [reading, setReading] = useState<VitalReading>(DEFAULT_READING)
   const [samples, setSamples] = useState<PpgSample[]>([])
@@ -63,17 +66,22 @@ export function useMonitor(): MonitorApi {
   const [caps, setCaps] = useState<CameraCapabilitiesSnapshot | null>(null)
   const [pendingCount, setPendingCount] = useState(0)
 
-  useEffect(() => {
-    return () => {
-      // limpieza al desmontar
+  useEffect(
+    () => () => {
       void cameraRef.current?.stop()
       motionRef.current?.stop()
-    }
-  }, [])
+    },
+    []
+  )
 
   const start = useCallback(async () => {
     if (running) return
     setError(null)
+    samplesRef.current = []
+    beatsRef.current = []
+    setSamples([])
+    setBeats([])
+    setReading(DEFAULT_READING)
     try {
       const motion = new MotionEstimator()
       await motion.requestPermissionIfNeeded()
@@ -91,30 +99,46 @@ export function useMonitor(): MonitorApi {
         targetFps,
         onFrame: (frame) => {
           const motionScore = motionRef.current?.score() ?? 0
-          const cal = calibrationRefLoad(calibrationMgr, capsSnap?.deviceId ?? '')
-          const step = pipeline.process(frame, motionScore, cal)
-          samplesRef.current.push(step.sample)
-          if (samplesRef.current.length > SAMPLE_BUFFER_LIMIT)
-            samplesRef.current.splice(0, samplesRef.current.length - SAMPLE_BUFFER_LIMIT)
-          if (step.beat) {
-            beatsRef.current.push(step.beat)
-            if (beatsRef.current.length > BEAT_BUFFER_LIMIT)
-              beatsRef.current.splice(0, beatsRef.current.length - BEAT_BUFFER_LIMIT)
+          const step = pipeline.process(frame, motionScore, calibrationRef.current)
+
+          if (step.sample === null) {
+            // Sin contacto: limpiamos onda y latidos (no queremos residuos).
+            if (samplesRef.current.length !== 0) samplesRef.current = []
+            if (beatsRef.current.length !== 0) beatsRef.current = []
+          } else {
+            samplesRef.current.push(step.sample)
+            if (samplesRef.current.length > SAMPLE_BUFFER_LIMIT) {
+              samplesRef.current.splice(0, samplesRef.current.length - SAMPLE_BUFFER_LIMIT)
+            }
+            if (step.beat) {
+              beatsRef.current.push(step.beat)
+              if (beatsRef.current.length > BEAT_BUFFER_LIMIT) {
+                beatsRef.current.splice(0, beatsRef.current.length - BEAT_BUFFER_LIMIT)
+              }
+            }
           }
-          setReading(step.reading)
-          setFps(pipeline.fpsActual())
-          setSamples([...samplesRef.current])
-          setBeats([...beatsRef.current])
+
+          const now = performance.now()
+          if (now - lastPublishRef.current >= PUBLISH_THROTTLE_MS) {
+            lastPublishRef.current = now
+            setReading(step.reading)
+            setFps(pipeline.fpsActual())
+            setSamples(samplesRef.current.slice())
+            setBeats(beatsRef.current.slice())
+          }
         }
       })
       setCaps(capsSnap)
-      setCalibration(calibrationMgr.find(capsSnap.deviceId, navigator.userAgent))
+      const foundCal = calibrationMgr.find(capsSnap.deviceId, navigator.userAgent)
+      calibrationRef.current = foundCal
+      setCalibration(foundCal)
       setRunning(true)
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
       setError(message)
       await cameraRef.current?.stop()
       motionRef.current?.stop()
+      setRunning(false)
     }
   }, [calibrationMgr, running])
 
@@ -122,13 +146,22 @@ export function useMonitor(): MonitorApi {
     await cameraRef.current?.stop()
     motionRef.current?.stop()
     pipelineRef.current?.reset()
+    samplesRef.current = []
+    beatsRef.current = []
+    setSamples([])
+    setBeats([])
+    setReading(DEFAULT_READING)
+    setFps(0)
     setRunning(false)
   }, [])
 
   const captureCalibrationPoint = useCallback(
     (reference: number) => {
-      if (!reading.state) return
-      const valid = reading.state === 'MEASURING' && reading.sqi >= 0.55 && reading.motionScore < 0.25 && reading.perfusionIndex > 0.6
+      const valid =
+        reading.state === 'MEASURING' &&
+        reading.sqi >= 0.55 &&
+        reading.motionScore < 0.25 &&
+        reading.perfusionIndex > 0.6
       if (!valid) return
       pendingRef.current.push({
         capturedAtMs: Date.now(),
@@ -155,6 +188,7 @@ export function useMonitor(): MonitorApi {
       `web-calibration@${new Date().toISOString()}`
     )
     if (profile) {
+      calibrationRef.current = profile
       setCalibration(profile)
       pendingRef.current = []
       setPendingCount(0)
@@ -182,8 +216,4 @@ export function useMonitor(): MonitorApi {
     applyCalibration,
     clearCalibration
   }
-}
-
-function calibrationRefLoad(mgr: DeviceCalibrationManager, deviceId: string): CalibrationProfile | null {
-  return mgr.find(deviceId, navigator.userAgent)
 }

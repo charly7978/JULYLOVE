@@ -20,13 +20,32 @@ import type {
 import { VALIDITY, stateAllowsMetrics } from './types'
 
 export interface PipelineStep {
-  sample: PpgSample
+  sample: PpgSample | null
   reading: VitalReading
   beat: BeatEvent | null
   acceptedFrame: boolean
-  spo2Debug: Spo2Result
-  screening: ArrhythmiaSummary
+  spo2Debug: Spo2Result | null
+  screening: ArrhythmiaSummary | null
 }
+
+const BLANK_READING = (state: MeasurementState, message: string): VitalReading => ({
+  bpm: null,
+  bpmConfidence: 0,
+  spo2: null,
+  spo2Confidence: 0,
+  sqi: 0,
+  perfusionIndex: 0,
+  motionScore: 0,
+  rrMs: null,
+  rrSdnnMs: null,
+  pnn50: null,
+  beatsDetected: 0,
+  abnormalBeats: 0,
+  state,
+  validityFlags: VALIDITY.NO_FINGER,
+  message,
+  hypertensionRisk: null
+})
 
 export class PpgPipeline {
   private readonly sampleRate: number
@@ -47,6 +66,7 @@ export class PpgPipeline {
   private fpsMovingAvg = 0
   private fpsJitter = 0
   private lastFrameTsMs: number | null = null
+  private measuringSinceMs: number | null = null
 
   constructor(sampleRate: number) {
     this.sampleRate = sampleRate
@@ -67,6 +87,7 @@ export class PpgPipeline {
     this.targetFps = fps
   }
 
+  /** Reset completo, usado al (re)iniciar la medición. */
   reset(): void {
     this.preprocessor.reset()
     this.spo2.reset()
@@ -82,31 +103,56 @@ export class PpgPipeline {
     this.fpsMovingAvg = 0
     this.fpsJitter = 0
     this.lastFrameTsMs = null
+    this.measuringSinceMs = null
   }
 
-  fpsActual(): number {
-    return this.fpsMovingAvg
+  /** Reset parcial al perder contacto: evita arrastrar filtros/picos viejos. */
+  private resetOnContactLost(): void {
+    this.preprocessor.reset()
+    this.spo2.reset()
+    this.spectral.reset()
+    this.elgendi.reset()
+    this.derivative.reset()
+    this.classifier.reset()
+    this.screening.reset()
+    this.lastBeatTsMs = null
+    this.totalBeats = 0
+    this.abnormalBeats = 0
+    this.measuringSinceMs = null
   }
 
-  jitterMs(): number {
-    return this.fpsJitter
-  }
+  fpsActual(): number { return this.fpsMovingAvg }
+  jitterMs(): number { return this.fpsJitter }
 
-  process(frame: CameraFrameStats, motionScore: number, calibration: CalibrationProfile | null): PipelineStep {
+  process(
+    frame: CameraFrameStats,
+    motionScore: number,
+    calibration: CalibrationProfile | null
+  ): PipelineStep {
     this.updateFps(frame.timestampMs)
+
+    // Evaluación de contacto ANTES de tocar los filtros. Si no hay contacto,
+    // la salida es un reading en blanco y los filtros se resetean, de modo
+    // que al volver el dedo no haya residuo.
+    const pre0 = { perfusionIndex: 0, filtered: 0, detrended: 0, ac: 0, dc: 0 }
+    const contactDecision = this.contact.evaluate(frame, motionScore, this.fpsMovingAvg)
+    if (contactDecision.state === 'NO_CONTACT') {
+      this.resetOnContactLost()
+      const r = BLANK_READING('NO_CONTACT', 'Coloque el dedo sobre la cámara y el flash')
+      return { sample: null, reading: r, beat: null, acceptedFrame: false, spo2Debug: null, screening: null }
+    }
+    if (contactDecision.state === 'CONTACT_PARTIAL') {
+      this.resetOnContactLost()
+      const r = BLANK_READING('CONTACT_PARTIAL', 'Contacto parcial — cubra por completo la lente')
+      return { sample: null, reading: r, beat: null, acceptedFrame: false, spo2Debug: null, screening: null }
+    }
 
     const pre = this.preprocessor.process(frame.redMean)
     this.spo2.push(frame.redMean, frame.greenMean, frame.blueMean)
     this.spectral.push(pre.filtered)
 
-    const { state: contactState, flags: validityFlags } = this.contact.evaluate(
-      frame,
-      motionScore,
-      this.fpsMovingAvg
-    )
-
     let beat: BeatEvent | null = null
-    if (stateAllowsMetrics(contactState)) {
+    if (stateAllowsMetrics(contactDecision.state)) {
       const peak = this.elgendi.feed(pre.filtered, frame.timestampMs)
       const confirm = this.derivative.feed(pre.filtered, frame.timestampMs)
       if (peak) {
@@ -122,10 +168,10 @@ export class PpgPipeline {
           type: 'NORMAL' as BeatType,
           reason: ''
         }
-        const confirmed = confirm !== null || (pre.perfusionIndex > 0.3 && validityFlags === 0)
         const sqiQuick = this.estimateSqiQuick(pre.perfusionIndex, motionScore, frame.clipHighRatio)
         const classified = this.classifier.classify(raw, sqiQuick)
-        if (classified.type !== 'INVALID_SIGNAL' && confirmed) {
+        const confirmed = confirm !== null && pre.perfusionIndex > 0.5 && classified.type !== 'INVALID_SIGNAL'
+        if (confirmed) {
           this.screening.ingest(classified)
           this.lastBeatTsMs = peak.timestampMs
           this.totalBeats++
@@ -137,7 +183,7 @@ export class PpgPipeline {
 
     const screeningSummary = this.screening.compute(1.0)
     const sqiValue = this.sqi.evaluate({
-      hasContact: stateAllowsMetrics(contactState) || contactState === 'WARMUP',
+      hasContact: stateAllowsMetrics(contactDecision.state) || contactDecision.state === 'WARMUP',
       perfusionIndex: pre.perfusionIndex,
       clipHighRatio: frame.clipHighRatio,
       clipLowRatio: frame.clipLowRatio,
@@ -154,16 +200,52 @@ export class PpgPipeline {
     const medianRr = this.classifier.medianRr()
     const rrBpm = medianRr !== null ? 60000 / medianRr : null
     const fused = this.fusion.fuse(rrBpm, screeningSummary.rrCount, spec.bpm, spec.coherence, sqiValue)
-    const spo2Result = this.spo2.estimate(calibration, pre.perfusionIndex, sqiValue, motionScore, frame.clipHighRatio)
+    const spo2Result = this.spo2.estimate(
+      calibration,
+      pre.perfusionIndex,
+      sqiValue,
+      motionScore,
+      frame.clipHighRatio
+    )
 
-    let allFlags = validityFlags
-    if (this.fpsMovingAvg > 1 && this.fpsMovingAvg < 18) allFlags |= VALIDITY.LOW_FPS
+    let allFlags = contactDecision.flags
+    if (this.fpsMovingAvg > 1 && this.fpsMovingAvg < 15) allFlags |= VALIDITY.LOW_FPS
     if (pre.perfusionIndex < 0.3) allFlags |= VALIDITY.LOW_PERFUSION
-    if (!calibration && stateAllowsMetrics(contactState)) allFlags |= VALIDITY.CALIBRATION_MISSING
+    if (!calibration && stateAllowsMetrics(contactDecision.state)) allFlags |= VALIDITY.CALIBRATION_MISSING
+    if (screeningSummary.rrCount < 5) allFlags |= VALIDITY.NOT_ENOUGH_BEATS
 
-    const finalState: MeasurementState = contactState
-    const message = this.composeMessage(finalState, allFlags, !calibration)
-    const risk = this.hypertensionRisk(fused.bpm, screeningSummary, pre.perfusionIndex, sqiValue)
+    // Sólo si el estado permite métricas Y hay latidos confirmados mínimos
+    // publicamos BPM/SpO2. Esto evita "números sin dedo".
+    const canShowBpm =
+      stateAllowsMetrics(contactDecision.state) &&
+      fused.bpm !== null &&
+      fused.confidence >= 0.4 &&
+      this.totalBeats >= 4 &&
+      sqiValue >= 0.4 &&
+      pre.perfusionIndex >= 0.4
+    const canShowSpo2 =
+      canShowBpm && calibration !== null && spo2Result.spo2 !== null && spo2Result.confidence >= 0.4
+
+    const reading: VitalReading = {
+      bpm: canShowBpm ? fused.bpm : null,
+      bpmConfidence: canShowBpm ? fused.confidence : 0,
+      spo2: canShowSpo2 ? spo2Result.spo2 : null,
+      spo2Confidence: canShowSpo2 ? spo2Result.confidence : 0,
+      sqi: sqiValue,
+      perfusionIndex: pre.perfusionIndex,
+      motionScore,
+      rrMs: canShowBpm ? screeningSummary.meanRr : null,
+      rrSdnnMs: canShowBpm ? screeningSummary.sdnnMs : null,
+      pnn50: canShowBpm ? screeningSummary.pnn50 : null,
+      beatsDetected: this.totalBeats,
+      abnormalBeats: this.abnormalBeats,
+      state: contactDecision.state,
+      validityFlags: allFlags,
+      message: this.composeMessage(contactDecision.state, allFlags, !calibration),
+      hypertensionRisk: canShowBpm
+        ? this.hypertensionRisk(fused.bpm, screeningSummary, pre.perfusionIndex, sqiValue)
+        : null
+    }
 
     const sample: PpgSample = {
       timestampMs: frame.timestampMs,
@@ -173,29 +255,17 @@ export class PpgPipeline {
       sqi: sqiValue,
       perfusionIndex: pre.perfusionIndex,
       motionScore,
-      valid: stateAllowsMetrics(finalState)
+      valid: stateAllowsMetrics(contactDecision.state)
     }
 
-    const reading: VitalReading = {
-      bpm: fused.bpm,
-      bpmConfidence: fused.confidence,
-      spo2: spo2Result.spo2,
-      spo2Confidence: spo2Result.confidence,
-      sqi: sqiValue,
-      perfusionIndex: pre.perfusionIndex,
-      motionScore,
-      rrMs: screeningSummary.meanRr,
-      rrSdnnMs: screeningSummary.sdnnMs,
-      pnn50: screeningSummary.pnn50,
-      beatsDetected: this.totalBeats,
-      abnormalBeats: this.abnormalBeats,
-      state: finalState,
-      validityFlags: allFlags,
-      message,
-      hypertensionRisk: risk
+    return {
+      sample,
+      reading,
+      beat,
+      acceptedFrame: stateAllowsMetrics(contactDecision.state),
+      spo2Debug: spo2Result,
+      screening: screeningSummary
     }
-
-    return { sample, reading, beat, acceptedFrame: stateAllowsMetrics(finalState), spo2Debug: spo2Result, screening: screeningSummary }
   }
 
   private estimateSqiQuick(pi: number, motion: number, clipHigh: number): number {
@@ -229,9 +299,8 @@ export class PpgPipeline {
     if (flags & VALIDITY.LOW_PERFUSION) return 'Baja perfusión — caliente el dedo'
     if (flags & VALIDITY.LOW_FPS) return 'FPS inestable — verifique condiciones del dispositivo'
     if (state === 'WARMUP') return 'Calentando sensor óptico — aguarde'
-    if (calibrationMissing && state === 'MEASURING') {
-      return 'SpO₂ requiere calibración con oxímetro de referencia'
-    }
+    if (flags & VALIDITY.NOT_ENOUGH_BEATS) return 'Acumulando latidos válidos — no mover'
+    if (calibrationMissing && state === 'MEASURING') return 'SpO₂ requiere calibración con oxímetro de referencia'
     return 'Midiendo — mantenga el dedo inmóvil'
   }
 

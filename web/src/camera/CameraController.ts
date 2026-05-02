@@ -17,15 +17,21 @@ export interface CameraCapabilitiesSnapshot {
   focusMode: string | null
 }
 
+type MediaStreamVideoTrack = MediaStreamTrack & {
+  getCapabilities?: () => MediaTrackCapabilities
+  applyConstraints: (c: MediaTrackConstraints) => Promise<void>
+}
+
 /**
- * Controlador de cámara para la web. Utiliza `getUserMedia` con
- * `facingMode: environment` y activa el torch vía
- * `MediaStreamTrack.applyConstraints({ advanced: [{ torch: true }] })`
- * cuando el dispositivo lo expone (Chrome Android).
+ * Controlador de cámara web. Utiliza getUserMedia con `facingMode:environment`
+ * y activa el torch con applyConstraints({advanced:[{torch:true}]}) cuando el
+ * browser/dispositivo lo expone (Chrome Android).
  *
- * Los frames se procesan con un canvas oculto: se pinta el `videoElement` en
- * él, se lee el píxel del ROI central y se calculan medias R/G/B y estadísticos
- * necesarios por el pipeline. No se almacenan frames ni video.
+ * Cada frame se procesa con un <canvas> oculto: se pinta el videoElement y se
+ * lee sólo el ROI central. Se calculan R/G/B medios, varianza espacial del
+ * rojo y —crítico— la fracción real de píxeles del ROI que lucen como dedo
+ * iluminado por flash (rojo dominante, no saturado, no oscuro). Ese es el
+ * valor que el detector de contacto usa para decidir si hay dedo o no.
  */
 export class CameraController {
   private stream: MediaStream | null = null
@@ -35,7 +41,6 @@ export class CameraController {
   private ctx: CanvasRenderingContext2D | null = null
   private running = false
   private rafId: number | null = null
-  private capturedFrames = 0
   private caps: CameraCapabilitiesSnapshot | null = null
 
   async start(options: StartOptions): Promise<CameraCapabilitiesSnapshot> {
@@ -61,7 +66,7 @@ export class CameraController {
     let torchOn = false
     if (torchSupported) {
       try {
-        // @ts-expect-error torch no está tipado en lib.dom todavía
+        // @ts-expect-error torch no está tipado en lib.dom
         await this.track.applyConstraints({ advanced: [{ torch: true }] })
         torchOn = true
       } catch {
@@ -75,19 +80,22 @@ export class CameraController {
     this.video.srcObject = this.stream
     await this.video.play()
 
-    const w = settings.width ?? this.video.videoWidth
-    const h = settings.height ?? this.video.videoHeight
+    const w = settings.width ?? this.video.videoWidth ?? 640
+    const h = settings.height ?? this.video.videoHeight ?? 480
     this.canvas = document.createElement('canvas')
-    this.canvas.width = w
-    this.canvas.height = h
+    // Downscale agresivo: con 320x240 hay sobra para ROI + ahorra CPU/GPU.
+    const DOWNSCALED_WIDTH = 320
+    const scale = Math.min(1, DOWNSCALED_WIDTH / w)
+    this.canvas.width = Math.max(64, Math.round(w * scale))
+    this.canvas.height = Math.max(48, Math.round(h * scale))
     this.ctx = this.canvas.getContext('2d', { willReadFrequently: true })
     if (!this.ctx) throw new Error('No se pudo crear canvas 2D para captura de frames')
 
     this.caps = {
       deviceId: settings.deviceId ?? 'default',
       label: this.track.label || 'cámara trasera',
-      width: w,
-      height: h,
+      width: this.canvas.width,
+      height: this.canvas.height,
       frameRate: settings.frameRate ?? null,
       torchSupported,
       torchOn,
@@ -96,7 +104,6 @@ export class CameraController {
     }
 
     this.running = true
-    this.capturedFrames = 0
     const loop = () => {
       if (!this.running) return
       try {
@@ -142,7 +149,6 @@ export class CameraController {
     if (this.video.readyState < 2) return null
     const w = this.canvas.width
     const h = this.canvas.height
-    // ROI = 60% central. Se dibuja el video completo y sólo se lee el ROI.
     const roiW = Math.max(16, Math.floor(w * 0.6))
     const roiH = Math.max(16, Math.floor(h * 0.6))
     const roiX = Math.floor((w - roiW) / 2)
@@ -150,41 +156,49 @@ export class CameraController {
     this.ctx.drawImage(this.video, 0, 0, w, h)
     const imageData = this.ctx.getImageData(roiX, roiY, roiW, roiH)
     const data = imageData.data
-    const step = roiW > 320 ? 2 : 1
+    const total = roiW * roiH
+    if (total === 0) return null
 
     let sumR = 0
     let sumG = 0
     let sumB = 0
-    let sumY = 0
-    let sumY2 = 0
+    let sumR2 = 0
     let clipHigh = 0
     let clipLow = 0
-    let count = 0
-    for (let y = 0; y < roiH; y += step) {
-      for (let x = 0; x < roiW; x += step) {
-        const idx = (y * roiW + x) * 4
-        const r = data[idx]
-        const g = data[idx + 1]
-        const b = data[idx + 2]
-        const yv = (0.299 * r + 0.587 * g + 0.114 * b) | 0
-        sumR += r
-        sumG += g
-        sumB += b
-        sumY += yv
-        sumY2 += yv * yv
-        if (yv >= 250) clipHigh++
-        if (yv <= 5) clipLow++
-        count++
-      }
+    let fingerPixels = 0
+
+    // Umbrales de píxel-dedo bajo flash blanco:
+    //   R dominante sobre G y B, en rango razonable, no saturado ni oscuro.
+    const FINGER_MIN_R = 80
+    const FINGER_MAX_R = 250
+    const FINGER_MIN_RG = 1.25
+    const FINGER_MIN_RB = 1.35
+
+    for (let i = 0; i < data.length; i += 4) {
+      const r = data[i]
+      const g = data[i + 1]
+      const b = data[i + 2]
+      sumR += r
+      sumG += g
+      sumB += b
+      sumR2 += r * r
+      if (r >= 250) clipHigh++
+      if (r <= 5) clipLow++
+      const isFinger =
+        r >= FINGER_MIN_R &&
+        r <= FINGER_MAX_R &&
+        (g <= 1 || r / Math.max(1, g) >= FINGER_MIN_RG) &&
+        (b <= 1 || r / Math.max(1, b) >= FINGER_MIN_RB)
+      if (isFinger) fingerPixels++
     }
-    if (count === 0) return null
-    const invN = 1 / count
+
+    const invN = 1 / total
     const rMean = sumR * invN
     const gMean = sumG * invN
     const bMean = sumB * invN
-    const yMean = sumY * invN
-    const yVar = sumY2 * invN - yMean * yMean
-    this.capturedFrames++
+    const rVar = sumR2 * invN - rMean * rMean
+    const coverage = fingerPixels / total
+
     return {
       timestampMs: performance.now(),
       width: w,
@@ -194,13 +208,8 @@ export class CameraController {
       blueMean: bMean,
       clipHighRatio: clipHigh * invN,
       clipLowRatio: clipLow * invN,
-      roiCoverage: (count * step * step) / (w * h),
-      roiVariance: yVar
+      roiCoverage: coverage,
+      roiVariance: rVar
     }
   }
-}
-
-type MediaStreamVideoTrack = MediaStreamTrack & {
-  getCapabilities?: () => MediaTrackCapabilities
-  applyConstraints: (c: MediaTrackConstraints) => Promise<void>
 }
