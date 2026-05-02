@@ -175,10 +175,12 @@ export class PpgPipeline {
       }
     }
     if (contactDecision.state === 'CONTACT_PARTIAL') {
-      this.resetOnContactLost()
+      // Estado transitorio "subiendo al contacto". NO reseteamos el pipeline
+      // porque eso destruiría el detrender/bandpass que recién empezó a
+      // converger; sólo evitamos publicar métricas.
       return {
         sample: null,
-        reading: BLANK_READING('CONTACT_PARTIAL', 'Contacto parcial — cubra por completo la lente'),
+        reading: BLANK_READING('CONTACT_PARTIAL', 'Acomodando dedo — manténgalo quieto'),
         beat: null,
         acceptedFrame: false,
         spo2Debug: null,

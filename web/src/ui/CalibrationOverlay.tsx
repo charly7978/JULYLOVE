@@ -36,6 +36,12 @@ export function CalibrationOverlay({ monitor, onClose }: { monitor: MonitorApi; 
         <div>SQI: {monitor.reading.sqi.toFixed(2)}</div>
         <div>PI: {monitor.reading.perfusionIndex.toFixed(2)}</div>
         <div>Movimiento: {monitor.reading.motionScore.toFixed(2)}</div>
+        <div>
+          Ratio R ={' '}
+          {monitor.lastRatioOfRatios !== null
+            ? monitor.lastRatioOfRatios.toFixed(3)
+            : '—'}
+        </div>
       </div>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
         <input

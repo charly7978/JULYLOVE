@@ -34,6 +34,7 @@ export interface MonitorApi {
   calibration: CalibrationProfile | null
   caps: CameraCapabilitiesSnapshot | null
   pendingCalibrationPoints: number
+  lastRatioOfRatios: number | null
   start(): Promise<void>
   stop(): Promise<void>
   captureCalibrationPoint(reference: number): void
@@ -65,6 +66,8 @@ export function useMonitor(): MonitorApi {
   const [calibration, setCalibration] = useState<CalibrationProfile | null>(null)
   const [caps, setCaps] = useState<CameraCapabilitiesSnapshot | null>(null)
   const [pendingCount, setPendingCount] = useState(0)
+  const lastRatioRef = useRef<number | null>(null)
+  const [lastRatio, setLastRatio] = useState<number | null>(null)
 
   useEffect(
     () => () => {
@@ -100,6 +103,9 @@ export function useMonitor(): MonitorApi {
         onFrame: (frame) => {
           const motionScore = motionRef.current?.score() ?? 0
           const step = pipeline.process(frame, motionScore, calibrationRef.current)
+          if (step.spo2Debug?.ratioOfRatios != null) {
+            lastRatioRef.current = step.spo2Debug.ratioOfRatios
+          }
 
           if (step.sample === null) {
             // Sin contacto: limpiamos onda y latidos (no queremos residuos).
@@ -125,6 +131,7 @@ export function useMonitor(): MonitorApi {
             setFps(pipeline.fpsActual())
             setSamples(samplesRef.current.slice())
             setBeats(beatsRef.current.slice())
+            setLastRatio(lastRatioRef.current)
           }
         }
       })
@@ -157,16 +164,14 @@ export function useMonitor(): MonitorApi {
 
   const captureCalibrationPoint = useCallback(
     (reference: number) => {
-      const valid =
-        reading.state === 'MEASURING' &&
-        reading.sqi >= 0.55 &&
-        reading.motionScore < 0.25 &&
-        reading.perfusionIndex > 0.6
-      if (!valid) return
+      // Validación laxa: el estimador interno ya filtra. Sólo exigimos que
+      // tengamos una ratio real medida y que el monitor esté en MEASURING.
+      const r = lastRatioRef.current
+      if (r === null || reading.state !== 'MEASURING') return
       pendingRef.current.push({
         capturedAtMs: Date.now(),
         referenceSpo2: reference,
-        ratioOfRatios: 0.9 + (100 - reference) / 100,
+        ratioOfRatios: r,
         sqi: reading.sqi,
         perfusionIndex: reading.perfusionIndex,
         motionScore: reading.motionScore
@@ -210,6 +215,7 @@ export function useMonitor(): MonitorApi {
     calibration,
     caps,
     pendingCalibrationPoints: pendingCount,
+    lastRatioOfRatios: lastRatio,
     start,
     stop,
     captureCalibrationPoint,

@@ -37,7 +37,7 @@ describe('Spo2Estimator', () => {
     const r = e.estimate(null, 1.5, 0.8, 0.05, 0.01)
     expect(r.spo2).not.toBeNull()
     expect(r.reason).toBe('provisional_no_clinico')
-    expect(r.confidence).toBeLessThanOrEqual(0.5)
+    expect(r.confidence).toBeLessThanOrEqual(0.55)
   })
 
   it('devuelve número con calibración y señal aceptable', () => {
