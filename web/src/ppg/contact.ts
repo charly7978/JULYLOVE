@@ -1,3 +1,4 @@
+import { PROCESSING } from '../constants/processing'
 import type { CameraFrameStats, MeasurementState } from './types'
 import { VALIDITY } from './types'
 
@@ -5,6 +6,7 @@ export interface ContactEval {
   state: MeasurementState
   flags: number
   fingerProbability: number
+  reasonCodes: string[]
 }
 
 /**
@@ -28,74 +30,39 @@ export interface ContactEval {
  * La UI considera la onda visible en WARMUP/MEASURING/DEGRADED.
  */
 export class FingerContactDetector {
-  // Requisitos para ENTRAR a contacto sólido.
-  private readonly enterMinR: number
-  private readonly enterMaxR: number
-  private readonly enterMinRG: number
-  private readonly enterMinRB: number
-  private readonly enterMinCoverage: number
-
-  // Requisitos para MANTENER contacto (histéresis relajada).
-  private readonly holdMinR: number
-  private readonly holdMaxR: number
-  private readonly holdMinRG: number
-  private readonly holdMinRB: number
-  private readonly holdMinCoverage: number
-
   private okStreak = 0
   private badStreak = 0
-  private measuringSinceMs: number | null = null
   private lastState: MeasurementState = 'NO_CONTACT'
-  private readonly warmupMs: number
   private readonly enterStreak: number
   private readonly exitStreak: number
 
   constructor(opts?: {
-    warmupMs?: number
     enterStreak?: number
     exitStreak?: number
   }) {
-    this.warmupMs = opts?.warmupMs ?? 1500 // antes 2500; baja el tiempo a primer latido
-    this.enterStreak = opts?.enterStreak ?? 5 // ~170 ms a 30 Hz
-    this.exitStreak = opts?.exitStreak ?? 90 // ~3 s sostenidos para salir — absorbe glitches largos
-
-    this.enterMinR = 70
-    this.enterMaxR = 252
-    this.enterMinRG = 1.2
-    this.enterMinRB = 1.3
-    this.enterMinCoverage = 0.55
-
-    // Histéresis: una vez adentro, los umbrales caen ~30-50 %.
-    this.holdMinR = 45
-    this.holdMaxR = 254
-    this.holdMinRG = 1.02
-    this.holdMinRB = 1.05
-    this.holdMinCoverage = 0.3
+    this.enterStreak = opts?.enterStreak ?? 4
+    this.exitStreak = opts?.exitStreak ?? 6
   }
 
   reset(): void {
     this.okStreak = 0
     this.badStreak = 0
-    this.measuringSinceMs = null
     this.lastState = 'NO_CONTACT'
   }
 
   evaluate(frame: CameraFrameStats, motionScore: number, fps: number): ContactEval {
     let flags = 0
+    const reasonCodes: string[] = []
     const rgRatio = frame.greenMean > 1 ? frame.redMean / frame.greenMean : 0
     const rbRatio = frame.blueMean > 1 ? frame.redMean / frame.blueMean : 0
 
-    const inContact =
-      this.lastState === 'WARMUP' ||
-      this.lastState === 'MEASURING' ||
-      this.lastState === 'DEGRADED'
+    const inContact = this.lastState !== 'NO_CONTACT'
 
-    // Umbrales según si estamos entrando o manteniendo.
-    const minR = inContact ? this.holdMinR : this.enterMinR
-    const maxR = inContact ? this.holdMaxR : this.enterMaxR
-    const minRG = inContact ? this.holdMinRG : this.enterMinRG
-    const minRB = inContact ? this.holdMinRB : this.enterMinRB
-    const minCoverage = inContact ? this.holdMinCoverage : this.enterMinCoverage
+    const minR = inContact ? 50 : 70
+    const maxR = 252
+    const minRG = inContact ? 1.05 : 1.2
+    const minRB = inContact ? 1.08 : 1.25
+    const minCoverage = inContact ? 0.32 : 0.52
 
     const solid =
       frame.redMean >= minR &&
@@ -103,79 +70,62 @@ export class FingerContactDetector {
       rgRatio >= minRG &&
       rbRatio >= minRB &&
       frame.roiCoverage >= minCoverage &&
-      frame.clipHighRatio <= 0.35 &&
-      frame.clipLowRatio <= 0.25
+      frame.clipHighRatio <= PROCESSING.MAX_CLIP_HIGH_FOR_VALID &&
+      frame.clipLowRatio <= PROCESSING.MAX_CLIP_LOW_FOR_VALID
 
     if (!solid) {
-      // Motivo por el que no estamos en 'solid' para informar al usuario.
-      if (frame.redMean < minR || frame.roiCoverage < minCoverage) flags |= VALIDITY.NO_FINGER
-      if (rgRatio < minRG || rbRatio < minRB) flags |= VALIDITY.NO_FINGER
+      if (frame.redMean < minR) reasonCodes.push('CONTACT_RED_LOW')
+      if (frame.roiCoverage < minCoverage) reasonCodes.push('CONTACT_COVERAGE_LOW')
+      if (rgRatio < minRG || rbRatio < minRB) reasonCodes.push('CONTACT_CHROMA_LOW')
+      flags |= VALIDITY.NO_FINGER
     }
-    if (frame.clipHighRatio > 0.18) flags |= VALIDITY.CLIPPING_HIGH
-    if (frame.clipLowRatio > 0.15) flags |= VALIDITY.CLIPPING_LOW
-    if (motionScore > 0.7) flags |= VALIDITY.MOTION_HIGH
-    if (fps > 1 && fps < 12) flags |= VALIDITY.LOW_FPS
+    if (frame.clipHighRatio > PROCESSING.MAX_CLIP_HIGH_FOR_VALID) {
+      flags |= VALIDITY.CLIPPING_HIGH
+      reasonCodes.push('CONTACT_CLIP_HIGH')
+    }
+    if (frame.clipLowRatio > PROCESSING.MAX_CLIP_LOW_FOR_VALID) {
+      flags |= VALIDITY.CLIPPING_LOW
+      reasonCodes.push('CONTACT_CLIP_LOW')
+    }
+    if (motionScore > PROCESSING.MAX_MOTION_FOR_VALID) {
+      flags |= VALIDITY.MOTION_HIGH
+      reasonCodes.push('CONTACT_MOTION_HIGH')
+    }
+    if (fps > 1 && fps < 12) {
+      flags |= VALIDITY.LOW_FPS
+      reasonCodes.push('CONTACT_LOW_FPS')
+    }
 
-    // Override anti-microcorte: si ya estamos en contacto y el frame trae
-    // CUALQUIER evidencia de dedo (pixel rojo significativo + cobertura
-    // mínima), consideramos que el dedo no se fue, sólo hubo una variación
-    // óptica. badStreak no crece; okStreak tampoco cae tan rápido.
-    const minimalEvidence =
-      frame.redMean >= 35 && frame.roiCoverage >= 0.1 && rgRatio >= 0.95
+    const minimalEvidence = frame.redMean >= 35 && frame.roiCoverage >= 0.14 && rgRatio >= 0.95
 
     if (solid) {
       this.okStreak = Math.min(this.enterStreak * 8, this.okStreak + 1)
-      this.badStreak = Math.max(0, this.badStreak - 3) // recuperación rápida
+      this.badStreak = Math.max(0, this.badStreak - 3)
     } else if (inContact && minimalEvidence) {
-      // Dedo probablemente sigue ahí; sólo hay variación óptica.
       this.okStreak = Math.max(0, this.okStreak - 1)
-      this.badStreak = Math.max(0, this.badStreak - 0) // no crece
+      this.badStreak = Math.max(0, this.badStreak - 1)
+      reasonCodes.push('CONTACT_HYSTERESIS_HOLD')
     } else {
       this.okStreak = Math.max(0, this.okStreak - 1)
       this.badStreak = Math.min(this.exitStreak * 3, this.badStreak + 1)
     }
 
-    const state = this.nextState(solid, flags, frame.timestampMs)
+    const state = this.nextState()
     this.lastState = state
-    return { state, flags, fingerProbability: Math.max(0, Math.min(1, frame.roiCoverage)) }
+    return {
+      state,
+      flags,
+      fingerProbability: Math.max(0, Math.min(1, frame.roiCoverage)),
+      reasonCodes
+    }
   }
 
-  private nextState(solid: boolean, flags: number, timestampMs: number): MeasurementState {
-    const prev = this.lastState
-    const inContact =
-      prev === 'WARMUP' || prev === 'MEASURING' || prev === 'DEGRADED'
-
-    // Si estábamos NO_CONTACT/PARCIAL: necesitamos `enterStreak` frames sólidos.
-    if (!inContact) {
-      if (this.okStreak < this.enterStreak) {
-        // Decidir entre NO_CONTACT y CONTACT_PARTIAL para UX.
-        if (this.okStreak > 1) return 'CONTACT_PARTIAL'
-        return 'NO_CONTACT'
-      }
-      // Acabamos de entrar a contacto; empezamos warm-up.
-      this.measuringSinceMs = timestampMs
-      return 'WARMUP'
-    }
-
-    // Si estábamos ya en contacto: sólo salimos después de `exitStreak` frames malos.
+  private nextState(): MeasurementState {
     if (this.badStreak >= this.exitStreak) {
       this.okStreak = 0
-      this.measuringSinceMs = null
-      this.lastState = 'NO_CONTACT'
       return 'NO_CONTACT'
     }
-
-    // Mantenemos el estado "en contacto". Warm-up vs measuring.
-    const since = this.measuringSinceMs ?? timestampMs
-    if (timestampMs - since < this.warmupMs) return 'WARMUP'
-
-    const degradeMask =
-      VALIDITY.CLIPPING_HIGH |
-      VALIDITY.CLIPPING_LOW |
-      VALIDITY.MOTION_HIGH |
-      VALIDITY.LOW_FPS |
-      VALIDITY.LOW_PERFUSION
-    if (flags & degradeMask) return 'DEGRADED'
-    return 'MEASURING'
+    if (this.okStreak >= this.enterStreak) return 'PROBABLE_PPG'
+    return 'NO_CONTACT'
   }
 }

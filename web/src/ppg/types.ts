@@ -1,5 +1,6 @@
-// Tipos compartidos del pipeline PPG. Todos los valores numéricos que pueden
-// no existir se modelan como `number | null`; jamás se usan defaults cosméticos.
+// Tipos compartidos del pipeline PPG.
+// Regla clínica de este proyecto: "valor real o cero". Si no hay evidencia
+// óptica pulsátil viva validada, los biomarcadores se publican en cero.
 
 export interface CameraFrameStats {
   timestampMs: number
@@ -45,35 +46,26 @@ export interface BeatEvent {
   reason: string
 }
 
-export type MeasurementState =
-  | 'NO_CONTACT'
-  | 'CONTACT_PARTIAL'
-  | 'WARMUP'
-  | 'MEASURING'
-  | 'DEGRADED'
-  | 'INVALID'
-  | 'CALIBRATION_REQUIRED'
+export type MeasurementState = 'NO_CONTACT' | 'PROBABLE_PPG' | 'VALID_LIVE_PPG' | 'INVALID'
 
 export const MEASUREMENT_STATE_LABEL: Record<MeasurementState, string> = {
   NO_CONTACT: 'SIN CONTACTO',
-  CONTACT_PARTIAL: 'CONTACTO PARCIAL',
-  WARMUP: 'CALENTAMIENTO',
-  MEASURING: 'MIDIENDO',
-  DEGRADED: 'SEÑAL DEGRADADA',
-  INVALID: 'SIN LECTURA VÁLIDA',
-  CALIBRATION_REQUIRED: 'CALIBRACIÓN REQUERIDA'
+  PROBABLE_PPG: 'PPG PROBABLE',
+  VALID_LIVE_PPG: 'PPG VIVO VALIDADO',
+  INVALID: 'SIN LECTURA VÁLIDA'
 }
 
-export const stateAllowsMetrics = (s: MeasurementState): boolean =>
-  s === 'MEASURING' || s === 'DEGRADED'
+export const stateAllowsMetrics = (s: MeasurementState): boolean => s === 'VALID_LIVE_PPG'
 
 export type HypertensionRiskBand =
+  | 'NO_VALID_PPG'
   | 'NORMOTENSE'
   | 'BORDERLINE'
   | 'HYPERTENSIVE_PATTERN'
   | 'UNCERTAIN'
 
 export const HYPERTENSION_LABEL: Record<HypertensionRiskBand, { label: string; desc: string }> = {
+  NO_VALID_PPG: { label: 'NO_VALID_PPG', desc: 'Sin evidencia óptica pulsátil viva validada' },
   NORMOTENSE: { label: 'NORMOTENSO', desc: 'Patrón compatible con rango normal' },
   BORDERLINE: { label: 'LIMÍTROFE', desc: 'Patrón PPG compatible con rango elevado — verificar con médico' },
   HYPERTENSIVE_PATTERN: { label: 'PATRÓN HIPERTENSIVO', desc: 'Morfología PPG compatible con hipertensión — consultar médico' },
@@ -81,22 +73,28 @@ export const HYPERTENSION_LABEL: Record<HypertensionRiskBand, { label: string; d
 }
 
 export interface VitalReading {
-  bpm: number | null
+  bpm: number
   bpmConfidence: number
-  spo2: number | null
+  spo2: number
   spo2Confidence: number
   sqi: number
   perfusionIndex: number
   motionScore: number
-  rrMs: number | null
-  rrSdnnMs: number | null
-  pnn50: number | null
+  rrMs: number
+  rrSdnnMs: number
+  pnn50: number
   beatsDetected: number
   abnormalBeats: number
   state: MeasurementState
   validityFlags: number
   message: string
-  hypertensionRisk: HypertensionRiskBand | null
+  hypertensionRisk: HypertensionRiskBand
+  bloodPressureSystolic: number
+  bloodPressureDiastolic: number
+  glucoseMgDl: number
+  lipidsMgDl: number
+  arrhythmiaStatus: 'NO_VALID_PPG' | 'SIN_HALLAZGOS' | 'PATRON_IRREGULAR'
+  reasonCodes: string[]
 }
 
 export const VALIDITY = {

@@ -100,8 +100,8 @@ export function ArrhythmiaPanel({ reading }: { reading: VitalReading }) {
           value={`${reading.abnormalBeats}`}
           color={reading.abnormalBeats > 0 ? '#FF3344' : '#22FFAA'}
         />
-        <SmallStat label="SDNN" value={reading.rrSdnnMs !== null ? `${reading.rrSdnnMs.toFixed(0)} ms` : '—'} color="#AACCEE" />
-        <SmallStat label="pNN50" value={reading.pnn50 !== null ? `${(reading.pnn50 * 100).toFixed(0)}%` : '—'} color="#AACCEE" />
+        <SmallStat label="SDNN" value={`${reading.rrSdnnMs.toFixed(0)} ms`} color="#AACCEE" />
+        <SmallStat label="pNN50" value={`${(reading.pnn50 * 100).toFixed(0)}%`} color="#AACCEE" />
       </div>
       <div style={{ fontSize: 12, fontWeight: 700, color, marginTop: 6 }}>
         Presión / cribado: {risk ? HYPERTENSION_LABEL[risk].label : '—'}
