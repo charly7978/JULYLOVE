@@ -89,6 +89,8 @@ export class PpgPipeline {
   private fpsMovingAvg = 0
   private fpsJitter = 0
   private lastFrameTsMs: number | null = null
+  private bpmSmooth: number | null = null
+  private readonly bpmEmaAlpha = 0.15
 
   private readonly acBufRed: Float64Array
   private readonly acBufGreen: Float64Array
@@ -129,6 +131,7 @@ export class PpgPipeline {
     this.fpsMovingAvg = 0
     this.fpsJitter = 0
     this.lastFrameTsMs = null
+    this.bpmSmooth = null
     this.acBufRed.fill(0)
     this.acBufGreen.fill(0)
     this.acIdx = 0
@@ -146,6 +149,7 @@ export class PpgPipeline {
     this.lastBeatTsMs = null
     this.totalBeats = 0
     this.abnormalBeats = 0
+    this.bpmSmooth = null
     this.acBufRed.fill(0)
     this.acBufGreen.fill(0)
     this.acIdx = 0
@@ -191,6 +195,7 @@ export class PpgPipeline {
     const ampGreen = amplitude(this.acBufGreen, this.acFilled)
     const useGreen = ampGreen > ampRed * 1.05
     const chosenFiltered = useGreen ? greenOut.filtered : redOut.filtered
+    const chosenDisplay = useGreen ? greenOut.display : redOut.display
     const chosenPolarity = -1 // Ambos canales bajan en sístole.
     const chosenPi = useGreen ? greenOut.perfusionIndex : redOut.perfusionIndex
 
@@ -203,23 +208,58 @@ export class PpgPipeline {
         const prev = this.lastBeatTsMs
         const rr = prev !== null ? d.timestampMs - prev : null
         const bpmInstant = rr !== null && rr > 0 ? 60000 / rr : null
-        const sqiQuick = this.estimateSqiQuick(chosenPi, motionScore, frame.clipHighRatio)
-        const raw: BeatEvent = {
-          timestampMs: d.timestampMs,
-          amplitude: d.amplitude,
-          rrMs: rr,
-          bpmInstant,
-          quality: sqiQuick,
-          type: 'NORMAL' as BeatType,
-          reason: ''
+
+        // ═══════════════════════════════════════════════════════════════════
+        //  GATE FISIOLÓGICO DE RR — rechaza detecciones por ruido.
+        // ═══════════════════════════════════════════════════════════════════
+        //  1. Rango absoluto: 300 ms ≤ RR ≤ 1600 ms  (37 ≤ BPM ≤ 200).
+        //  2. Coherencia con mediana histórica: ±40 %.
+        //  3. Si el latido cae por coherencia, NO se cuenta y NO avanza
+        //     lastBeatTsMs — el siguiente candidato mide RR desde el
+        //     último latido VÁLIDO. Así un pico falso no genera una
+        //     cascada de RR absurdos.
+        let accept = true
+        let rejectReason = ''
+        if (rr !== null) {
+          if (rr < 300 || rr > 1600) {
+            accept = false
+            rejectReason = 'rr_fuera_rango_fisiologico'
+          } else {
+            const medianRr = this.classifier.medianRr()
+            if (medianRr !== null && Math.abs(rr - medianRr) / medianRr > 0.4) {
+              accept = false
+              rejectReason = 'rr_incoherente_con_mediana'
+            }
+          }
         }
-        const classified = this.classifier.classify(raw, sqiQuick)
-        if (classified.type !== 'INVALID_SIGNAL') {
-          this.screening.ingest(classified)
-          this.lastBeatTsMs = d.timestampMs
-          this.totalBeats++
-          if (classified.type !== 'NORMAL') this.abnormalBeats++
-          beat = classified
+        const sqiQuick = this.estimateSqiQuick(chosenPi, motionScore, frame.clipHighRatio)
+        if (!accept) {
+          // No actualizamos lastBeatTsMs para que el próximo candidato
+          // se compare contra el último latido ACEPTADO.
+        } else if (sqiQuick < 0.15) {
+          // Señal demasiado sucia: rechazar sin contar.
+          rejectReason = 'sqi_muy_bajo'
+        } else {
+          const raw: BeatEvent = {
+            timestampMs: d.timestampMs,
+            amplitude: d.amplitude,
+            rrMs: rr,
+            bpmInstant,
+            quality: sqiQuick,
+            type: 'NORMAL' as BeatType,
+            reason: ''
+          }
+          const classified = this.classifier.classify(raw, sqiQuick)
+          if (classified.type !== 'INVALID_SIGNAL') {
+            this.screening.ingest(classified)
+            this.lastBeatTsMs = d.timestampMs
+            this.totalBeats++
+            if (classified.type !== 'NORMAL') this.abnormalBeats++
+            beat = classified
+          }
+        }
+        if (rejectReason) {
+          // Silencioso: el detector descarta sin romper el flujo.
         }
       }
     }
@@ -260,17 +300,30 @@ export class PpgPipeline {
     const canShowBpm =
       stateAllowsMetrics(contactDecision.state) &&
       fused.bpm !== null &&
-      this.totalBeats >= 3 &&
-      sqiValue >= 0.2
+      this.totalBeats >= 5 &&
+      screeningSummary.rrCount >= 4 &&
+      sqiValue >= 0.25
     const canShowSpo2 = canShowBpm && spo2Result.spo2 !== null
+
+    // EMA del BPM publicado: evita saltos 70→120→90 entre RR consecutivos.
+    let bpmPublished: number | null = null
+    if (canShowBpm && fused.bpm !== null) {
+      if (this.bpmSmooth === null) this.bpmSmooth = fused.bpm
+      else this.bpmSmooth += this.bpmEmaAlpha * (fused.bpm - this.bpmSmooth)
+      bpmPublished = this.bpmSmooth
+    } else {
+      this.bpmSmooth = null
+    }
 
     // En CONTACT_PARTIAL emitimos sample para que la onda NO se corte visualmente
     // mientras el usuario acomoda el dedo; el overlay de estado se mantiene.
     const sample: PpgSample = {
       timestampMs: frame.timestampMs,
       raw: useGreen ? frame.greenMean : frame.redMean,
-      filtered: -chosenFiltered,
-      display: -chosenFiltered,
+      filtered: chosenFiltered,
+      // Invertido para que la sístole (caída en reflectancia) aparezca
+      // como PICO en pantalla — convención médica estándar.
+      display: -chosenDisplay,
       sqi: sqiValue,
       perfusionIndex: chosenPi,
       motionScore,
@@ -278,7 +331,7 @@ export class PpgPipeline {
     }
 
     const reading: VitalReading = {
-      bpm: canShowBpm ? fused.bpm : null,
+      bpm: bpmPublished,
       bpmConfidence: canShowBpm ? fused.confidence : 0,
       spo2: canShowSpo2 ? spo2Result.spo2 : null,
       spo2Confidence: canShowSpo2 ? spo2Result.confidence : 0,

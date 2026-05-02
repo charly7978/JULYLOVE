@@ -1,8 +1,12 @@
-import { BandpassFilter, Detrender } from './filters'
+import { BandpassFilter, Biquad, Detrender } from './filters'
 
 export interface PreprocessorOutput {
+  /** Solo DC removido: morfología PPG natural, para dibujar. */
   detrended: number
+  /** Banda 0.5-4 Hz: óptimo para detección de picos. */
   filtered: number
+  /** Señal morfológica suavizada (detrended + LP 2.5 Hz): ideal para pantalla. */
+  display: number
   dc: number
   ac: number
   perfusionIndex: number
@@ -23,6 +27,8 @@ export interface PreprocessorOutput {
 export class PpgPreprocessor {
   private readonly detrender: Detrender
   private readonly band: BandpassFilter
+  private readonly displayLp1: Biquad
+  private readonly displayLp2: Biquad
   private readonly sampleRate: number
   private dcEma = 0
   private initialized = false
@@ -34,12 +40,17 @@ export class PpgPreprocessor {
     this.sampleRate = sampleRate
     this.detrender = new Detrender(Math.max(30, Math.floor(sampleRate * 4)))
     this.band = new BandpassFilter(sampleRate, lowHz, highHz)
+    // LP display ≈ 3 Hz con Q de Butterworth orden 4 en cascada (2 biquads).
+    this.displayLp1 = Biquad.lowPass(3.5, sampleRate, Math.SQRT1_2)
+    this.displayLp2 = Biquad.lowPass(3.5, sampleRate, Math.SQRT1_2)
     this.acBuffer = new Float64Array(Math.max(30, Math.floor(sampleRate * 2)))
   }
 
   reset(): void {
     this.detrender.reset()
     this.band.reset()
+    this.displayLp1.reset()
+    this.displayLp2.reset()
     this.dcEma = 0
     this.initialized = false
     this.acBuffer.fill(0)
@@ -57,6 +68,7 @@ export class PpgPreprocessor {
     }
     const detrended = this.detrender.process(rawSample)
     const filtered = this.band.process(detrended)
+    const display = this.displayLp2.process(this.displayLp1.process(detrended))
 
     this.acBuffer[this.acIndex] = filtered
     this.acIndex = (this.acIndex + 1) % this.acBuffer.length
@@ -74,6 +86,6 @@ export class PpgPreprocessor {
     const ac = Number.isFinite(mx) && Number.isFinite(mn) ? Math.max(0, mx - mn) : 0
     const dc = Math.max(1, this.dcEma)
     const pi = Math.min(50, Math.max(0, (100 * ac) / dc))
-    return { detrended, filtered, dc, ac, perfusionIndex: pi }
+    return { detrended, filtered, display, dc, ac, perfusionIndex: pi }
   }
 }

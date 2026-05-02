@@ -26,8 +26,12 @@ const DEFAULT_READING: VitalReading = {
 
 export interface MonitorApi {
   reading: VitalReading
-  samples: PpgSample[]
-  beats: BeatEvent[]
+  /** Ref viva al ring buffer de muestras. No re-renderiza React. */
+  samplesRef: React.MutableRefObject<PpgSample[]>
+  /** Ref viva al ring buffer de latidos. */
+  beatsRef: React.MutableRefObject<BeatEvent[]>
+  /** Contador que sube cada vez que los buffers cambian (para invalidar memos si hace falta). */
+  tick: number
   fps: number
   running: boolean
   error: string | null
@@ -58,8 +62,7 @@ export function useMonitor(): MonitorApi {
   const calibrationRef = useRef<CalibrationProfile | null>(null)
 
   const [reading, setReading] = useState<VitalReading>(DEFAULT_READING)
-  const [samples, setSamples] = useState<PpgSample[]>([])
-  const [beats, setBeats] = useState<BeatEvent[]>([])
+  const [tick, setTick] = useState(0)
   const [fps, setFps] = useState(0)
   const [running, setRunning] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -82,8 +85,6 @@ export function useMonitor(): MonitorApi {
     setError(null)
     samplesRef.current = []
     beatsRef.current = []
-    setSamples([])
-    setBeats([])
     setReading(DEFAULT_READING)
     try {
       const motion = new MotionEstimator()
@@ -127,11 +128,13 @@ export function useMonitor(): MonitorApi {
           const now = performance.now()
           if (now - lastPublishRef.current >= PUBLISH_THROTTLE_MS) {
             lastPublishRef.current = now
+            // Los números (React state): throttled a 20 Hz. No incluimos
+            // los arrays de onda porque el canvas los lee de ref en su
+            // propio rAF — evita parpadeo por re-render masivo.
             setReading(step.reading)
             setFps(pipeline.fpsActual())
-            setSamples(samplesRef.current.slice())
-            setBeats(beatsRef.current.slice())
             setLastRatio(lastRatioRef.current)
+            setTick((t) => (t + 1) & 0xffff)
           }
         }
       })
@@ -155,11 +158,10 @@ export function useMonitor(): MonitorApi {
     pipelineRef.current?.reset()
     samplesRef.current = []
     beatsRef.current = []
-    setSamples([])
-    setBeats([])
     setReading(DEFAULT_READING)
     setFps(0)
     setRunning(false)
+    setTick((t) => (t + 1) & 0xffff)
   }, [])
 
   const captureCalibrationPoint = useCallback(
@@ -207,8 +209,9 @@ export function useMonitor(): MonitorApi {
 
   return {
     reading,
-    samples,
-    beats,
+    samplesRef,
+    beatsRef,
+    tick,
     fps,
     running,
     error,

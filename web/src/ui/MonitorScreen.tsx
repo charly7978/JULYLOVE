@@ -19,7 +19,10 @@ export function MonitorScreen({ monitor }: { monitor: MonitorApi }) {
   const bpm = r.bpm !== null && measuring ? r.bpm.toFixed(0) : '--'
   const spo2 = r.spo2 !== null && measuring ? r.spo2.toFixed(1) : '--'
   const rr = r.rrMs !== null && measuring ? r.rrMs.toFixed(0) : '--'
-  const showWave = monitor.running && (r.state === 'WARMUP' || measuring) && monitor.samples.length > 1
+  const showWave =
+    monitor.running &&
+    (r.state === 'WARMUP' || measuring) &&
+    monitor.samplesRef.current.length > 1
   const stateColor = colorOfState(r.state)
   const sqiBand = new SignalQualityIndex().band(r.sqi)
   const sqiColor =
@@ -53,7 +56,7 @@ export function MonitorScreen({ monitor }: { monitor: MonitorApi }) {
     <div style={rootStyle}>
       {/* La onda ocupa toda la pantalla */}
       <div style={waveContainer}>
-        <PpgWaveform samples={monitor.samples} beats={monitor.beats} windowSeconds={8} />
+        <PpgWaveform samplesRef={monitor.samplesRef} beatsRef={monitor.beatsRef} windowSeconds={8} />
         {!showWave ? (
           <div style={overlayCenter}>
             <div style={{ ...overlayTitle, color: stateColor }}>{MEASUREMENT_STATE_LABEL[r.state]}</div>
@@ -415,8 +418,8 @@ async function exportSessionJson(monitor: MonitorApi) {
   const payload = {
     exportedAtMs: Date.now(),
     reading: monitor.reading,
-    samples: monitor.samples.slice(-600),
-    beats: monitor.beats,
+    samples: monitor.samplesRef.current.slice(-600),
+    beats: monitor.beatsRef.current.slice(),
     calibrationProfileId: monitor.calibration?.profileId ?? null,
     caps: monitor.caps
   }

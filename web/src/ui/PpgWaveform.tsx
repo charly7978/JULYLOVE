@@ -4,19 +4,19 @@ import type { BeatEvent, PpgSample } from '../ppg/types'
 /**
  * Canvas de alto detalle para la onda PPG.
  *
+ * - Lee los buffers por REF: React no re-renderiza el canvas nunca.
  * - Respeta devicePixelRatio para trazo nítido en pantallas retina.
- * - Grilla médica: 12×8 mayores + sub-grilla 5× más fina.
- * - Onda con glow exterior + trazo principal + línea fina interior.
- * - Ticks temporales en segundos al pie de la grilla.
+ * - Grilla médica: 1 división mayor por segundo + sub-grilla 5× más fina.
+ * - Onda con glow exterior + trazo principal + línea interior luminosa.
  * - Marcadores de latido con altura proporcional a su amplitud.
  */
 export function PpgWaveform({
-  samples,
-  beats,
+  samplesRef,
+  beatsRef,
   windowSeconds = 8
 }: {
-  samples: PpgSample[]
-  beats: BeatEvent[]
+  samplesRef: React.MutableRefObject<PpgSample[]>
+  beatsRef: React.MutableRefObject<BeatEvent[]>
   windowSeconds?: number
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
@@ -26,12 +26,12 @@ export function PpgWaveform({
     if (!canvas) return
     let raf = 0
     const render = () => {
-      draw(canvas, samples, beats, windowSeconds)
+      draw(canvas, samplesRef.current, beatsRef.current, windowSeconds)
       raf = requestAnimationFrame(render)
     }
     raf = requestAnimationFrame(render)
     return () => cancelAnimationFrame(raf)
-  }, [samples, beats, windowSeconds])
+  }, [samplesRef, beatsRef, windowSeconds])
 
   useEffect(() => {
     const canvas = canvasRef.current

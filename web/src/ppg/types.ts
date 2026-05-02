@@ -17,7 +17,9 @@ export interface CameraFrameStats {
 export interface PpgSample {
   timestampMs: number
   raw: number
+  /** Señal post-bandpass, usada para análisis (detección de picos). */
   filtered: number
+  /** Señal morfológica (detrended + LP suave), usada para dibujar. */
   display: number
   sqi: number
   perfusionIndex: number
