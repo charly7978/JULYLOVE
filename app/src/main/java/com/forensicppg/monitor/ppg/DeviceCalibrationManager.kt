@@ -69,6 +69,7 @@ class DeviceCalibrationManager(private val context: Context) {
             torchIntensity = torchIntensity,
             coefficientA = intercept,
             coefficientB = -slope,
+            coefficientC = null,
             createdAtMs = System.currentTimeMillis(),
             algorithmVersion = algorithmVersion,
             calibrationSamples = valid.size,
@@ -114,6 +115,7 @@ class DeviceCalibrationManager(private val context: Context) {
         put("torchIntensity", p.torchIntensity ?: JSONObject.NULL)
         put("coefficientA", p.coefficientA)
         put("coefficientB", p.coefficientB)
+        put("coefficientC", p.coefficientC ?: JSONObject.NULL)
         put("createdAtMs", p.createdAtMs)
         put("algorithmVersion", p.algorithmVersion)
         put("calibrationSamples", p.calibrationSamples)
@@ -132,6 +134,7 @@ class DeviceCalibrationManager(private val context: Context) {
         torchIntensity = if (o.isNull("torchIntensity")) null else o.getDouble("torchIntensity"),
         coefficientA = o.getDouble("coefficientA"),
         coefficientB = o.getDouble("coefficientB"),
+        coefficientC = if (o.isNull("coefficientC")) null else o.optDouble("coefficientC", Double.NaN).takeUnless { it.isNaN() },
         createdAtMs = o.getLong("createdAtMs"),
         algorithmVersion = o.optString("algorithmVersion", "spo2-ppg-v1"),
         calibrationSamples = o.optInt("calibrationSamples", 0),

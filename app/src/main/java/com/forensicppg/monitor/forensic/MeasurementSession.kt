@@ -1,6 +1,6 @@
 package com.forensicppg.monitor.forensic
 
-import com.forensicppg.monitor.domain.BeatEvent
+import com.forensicppg.monitor.domain.ConfirmedBeat
 import com.forensicppg.monitor.domain.PpgSample
 
 /**
@@ -30,7 +30,7 @@ data class MeasurementSession(
     var framesRejected: Int = 0,
     var calibrationProfileId: String? = null,
     val samples: MutableList<PpgSample> = mutableListOf(),
-    val beats: MutableList<BeatEvent> = mutableListOf(),
+    val beats: MutableList<ConfirmedBeat> = mutableListOf(),
     val events: MutableList<MeasurementEvent> = mutableListOf(),
     var finalBpmMean: Double? = null,
     var finalBpmSdnn: Double? = null,

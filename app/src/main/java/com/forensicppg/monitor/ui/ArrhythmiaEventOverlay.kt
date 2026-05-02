@@ -48,12 +48,16 @@ fun ArrhythmiaEventOverlay(reading: VitalReading, modifier: Modifier = Modifier)
             Spacer(Modifier.height(4.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 SmallStat("LATIDOS", "${reading.beatsDetected}", Color(0xFF22FFAA))
-                SmallStat("ANÓMALOS", "${reading.abnormalBeats}", if (reading.abnormalBeats > 0) Color(0xFFFF3344) else Color(0xFF22FFAA))
+                SmallStat(
+                    "ANÓMALOS",
+                    "${reading.abnormalBeatCandidates}",
+                    if (reading.abnormalBeatCandidates > 0) Color(0xFFFF3344) else Color(0xFF22FFAA)
+                )
                 SmallStat("SDNN",
                     reading.rrSdnnMs?.let { "%.0f ms".format(it) } ?: "—",
                     Color(0xFFAACCEE))
                 SmallStat("pNN50",
-                    reading.pnn50?.let { "%.0f%%".format(it * 100) } ?: "—",
+                    reading.pnn50?.let { "%.0f%%".format(it) } ?: "—",
                     Color(0xFFAACCEE))
             }
             Spacer(Modifier.height(6.dp))

@@ -95,20 +95,38 @@ class SessionExporter(private val context: Context) {
 
     private fun writeSamples(f: File, s: MeasurementSession) {
         f.bufferedWriter().use { w ->
-            w.write("timestampNs,raw,filtered,displayValue,sqi,perfusionIndex,motionScore,valid\n")
+            w.write(
+                "timestampNs,monotonicRealtimeNs,rawRed,rawGreen,rawBlue,filtPri,display,sqi,motion,opticalMot," +
+                    "perfusionGreenPct,clipH,clipL,lowLight,roiWd,roiHt\n"
+            )
             for (sm in s.samples) {
-                w.write("${sm.timestampNs},${sm.raw},${sm.filtered},${sm.displayValue}," +
-                    "${sm.sqi},${sm.perfusionIndex},${sm.motionScore},${sm.valid}\n")
+                val rs = sm.roiStats
+                w.write(
+                    "${sm.timestampNs},${sm.monotonicRealtimeNs}," +
+                        "${sm.rawRed},${sm.rawGreen},${sm.rawBlue},${sm.filteredPrimary},${sm.displayWave}," +
+                        "${sm.sqi},${sm.motionScore},${sm.motionScoreOptical}," +
+                        "${rs.perfusionIndexGreenPct}," +
+                        "${sm.clippingHighRatio},${sm.clippingLowRatio},${sm.lowLightSuspected}," +
+                        "${rs.roiWidth},${rs.roiHeight}\n"
+                )
             }
         }
     }
 
     private fun writeBeats(f: File, s: MeasurementSession) {
         f.bufferedWriter().use { w ->
-            w.write("timestampNs,amplitude,rrMs,bpmInstant,quality,type,reason\n")
+            w.write(
+                "timestampNs,amplitude,rrMs,bpmApprox,confidence,sourceChannel,sqiSegment,rhythmMarker\n"
+            )
             for (b in s.beats) {
-                w.write("${b.timestampNs},${b.amplitude},${b.rrMs ?: ""}," +
-                    "${b.bpmInstant ?: ""},${b.quality},${b.type.name},\"${b.reason}\"\n")
+                val bpm = b.rrIntervalMs
+                    ?.takeIf { it in 278.9..2180.93 }
+                    ?.let { 60000.0 / it }
+                w.write(
+                    "${b.timestampNs},${b.amplitude},${b.rrIntervalMs ?: ""}," +
+                        "${if (bpm != null) String.format("%.2f", bpm) else ""}," +
+                        "${b.confidence},${b.sourceChannel},${b.sqiSegment},${b.rhythmMarker.name}\n"
+                )
             }
         }
     }

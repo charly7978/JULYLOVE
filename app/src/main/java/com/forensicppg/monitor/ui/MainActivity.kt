@@ -70,7 +70,7 @@ class MainActivity : ComponentActivity() {
                             onClose = { showCalibration = false }
                         )
                     } else {
-                        FullScreenMonitorScreen(
+                        MonitorScreen(
                             viewModel = viewModel,
                             onOpenCalibration = { showCalibration = true }
                         )

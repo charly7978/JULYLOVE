@@ -2,10 +2,7 @@ package com.forensicppg.monitor.ppg
 
 /**
  * Perfil de calibración de SpO₂ por dispositivo + cámara + parámetros ópticos.
- *
- * Nunca se genera ni asume un perfil por default. La app exige que el
- * usuario realice la rutina de calibración contra un oxímetro de referencia
- * antes de mostrar un número absoluto de SpO₂.
+ * Coeficientes provienen de regresión — no valores universales pretendidos clinicamente.
  */
 data class CalibrationProfile(
     val profileId: String,
@@ -18,24 +15,25 @@ data class CalibrationProfile(
     val torchIntensity: Double?,
     val coefficientA: Double,
     val coefficientB: Double,
+    val coefficientC: Double?,
     val createdAtMs: Long,
     val algorithmVersion: String,
     val calibrationSamples: Int,
     val minPerfusionIndex: Double,
     val notes: String
 ) {
-    /** SpO₂ = A − B × R, donde R = (AC_r/DC_r) / (AC_b/DC_b). Sólo se invoca
-     *  si existe un CalibrationProfile válido. */
+
+    /** R = ratio-of-ratios AC/DC. Modelo legacy lineal ó polinómico con [coefficientC] si existe. */
     fun apply(ratioOfRatios: Double): Double {
-        val raw = coefficientA - coefficientB * ratioOfRatios
+        val raw = if (coefficientC != null) {
+            coefficientA + coefficientB * ratioOfRatios + coefficientC!! * ratioOfRatios * ratioOfRatios
+        } else {
+            coefficientA - coefficientB * ratioOfRatios
+        }
         return raw.coerceIn(70.0, 100.0)
     }
 }
 
-/**
- * Punto de calibración: lectura de SpO₂ real medida por un oxímetro externo
- * (referencia) vs la ratio-of-ratios calculada por el pipeline en ese instante.
- */
 data class CalibrationPoint(
     val capturedAtMs: Long,
     val referenceSpo2: Double,

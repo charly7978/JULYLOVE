@@ -15,8 +15,8 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.dp
-import com.forensicppg.monitor.domain.BeatEvent
-import com.forensicppg.monitor.domain.BeatType
+import com.forensicppg.monitor.domain.BeatRhythmMarker
+import com.forensicppg.monitor.domain.ConfirmedBeat
 import com.forensicppg.monitor.domain.PpgSample
 import kotlinx.coroutines.flow.Flow
 
@@ -33,7 +33,7 @@ import kotlinx.coroutines.flow.Flow
 @Composable
 fun PpgWaveformCanvas(
     sampleFlow: Flow<PpgSample>,
-    beatFlow: Flow<BeatEvent>,
+    beatFlow: Flow<ConfirmedBeat>,
     modifier: Modifier = Modifier,
     windowSeconds: Double = 10.0
 ) {
@@ -113,8 +113,8 @@ private fun DrawScope.drawWave(ring: WaveRing, windowSeconds: Double) {
     for (i in 0 until n) {
         val s = ring.at(i) ?: continue
         if (s.timestampNs < tStart) continue
-        if (s.displayValue < mn) mn = s.displayValue
-        if (s.displayValue > mx) mx = s.displayValue
+        if (s.displayWave < mn) mn = s.displayWave
+        if (s.displayWave > mx) mx = s.displayWave
     }
     if (!mn.isFinite() || !mx.isFinite() || mx - mn < 1e-6) { mn -= 1.0; mx += 1.0 }
     val padding = (mx - mn) * 0.15
@@ -126,7 +126,7 @@ private fun DrawScope.drawWave(ring: WaveRing, windowSeconds: Double) {
         val s = ring.at(i) ?: continue
         if (s.timestampNs < tStart) continue
         val x = (((s.timestampNs - tStart).toDouble()) / span * size.width).toFloat()
-        val y = (size.height - ((s.displayValue - mn) / (mx - mn)) * size.height).toFloat()
+        val y = (size.height - ((s.displayWave - mn) / (mx - mn)) * size.height).toFloat()
         if (!started) { path.moveTo(x, y); started = true }
         else path.lineTo(x, y)
     }
@@ -147,15 +147,14 @@ private fun DrawScope.drawBeats(beatBuf: BeatRing, ring: WaveRing, windowSeconds
         val b = beatBuf.at(i) ?: continue
         if (b.timestampNs < tStart) continue
         val x = (((b.timestampNs - tStart).toDouble()) / span * size.width).toFloat()
-        val color = when (b.type) {
-            BeatType.NORMAL -> Color(0xCC22FFAA)
-            BeatType.SUSPECT_PREMATURE -> Color(0xFFFF3333)
-            BeatType.SUSPECT_PAUSE -> Color(0xFFFFAA22)
-            BeatType.SUSPECT_MISSED -> Color(0xFFFFAA22)
-            BeatType.IRREGULAR -> Color(0xFFFF8844)
-            BeatType.INVALID_SIGNAL -> Color(0xFF888888)
+        val color = when (b.rhythmMarker) {
+            BeatRhythmMarker.NORMAL -> Color(0xCC22FFAA)
+            BeatRhythmMarker.ECTOPIC_OR_PREMATURE -> Color(0xFFFF3333)
+            BeatRhythmMarker.PAUSE_SUSPECT -> Color(0xFFFFAA22)
+            BeatRhythmMarker.IRREGULAR -> Color(0xFFFF8844)
+            BeatRhythmMarker.INITIAL_NOT_ENOUGH_CONTEXT -> Color(0xFF88CCFF)
         }
-        val strokeW = if (b.type == BeatType.NORMAL) 1.6f else 3.0f
+        val strokeW = if (b.rhythmMarker == BeatRhythmMarker.NORMAL) 1.6f else 3.2f
         drawLine(
             color = color,
             start = androidx.compose.ui.geometry.Offset(x, 0f),
@@ -192,12 +191,12 @@ private class WaveRing(capacity: Int) {
 }
 
 private class BeatRing(capacity: Int) {
-    private val arr = arrayOfNulls<BeatEvent>(capacity)
+    private val arr = arrayOfNulls<ConfirmedBeat>(capacity)
     private var head = 0
     private var filled = 0
-    fun push(b: BeatEvent) { arr[head] = b; head = (head + 1) % arr.size; if (filled < arr.size) filled++ }
+    fun push(b: ConfirmedBeat) { arr[head] = b; head = (head + 1) % arr.size; if (filled < arr.size) filled++ }
     fun size(): Int = filled
-    fun at(i: Int): BeatEvent? {
+    fun at(i: Int): ConfirmedBeat? {
         if (i >= filled) return null
         val start = (head - filled + arr.size) % arr.size
         return arr[(start + i) % arr.size]

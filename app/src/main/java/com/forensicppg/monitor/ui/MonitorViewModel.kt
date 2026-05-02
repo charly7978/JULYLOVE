@@ -7,11 +7,11 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.forensicppg.monitor.BuildConfig
+import com.forensicppg.monitor.camera.Camera2PpgController
 import com.forensicppg.monitor.camera.CameraCapabilities
-import com.forensicppg.monitor.camera.CameraController
 import com.forensicppg.monitor.camera.CameraSessionConfig
-import com.forensicppg.monitor.domain.BeatEvent
-import com.forensicppg.monitor.domain.MeasurementState
+import com.forensicppg.monitor.domain.ConfirmedBeat
+import com.forensicppg.monitor.domain.PpgValidityState
 import com.forensicppg.monitor.domain.PpgSample
 import com.forensicppg.monitor.domain.VitalReading
 import com.forensicppg.monitor.forensic.AuditTrail
@@ -31,22 +31,19 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.UUID
 
-/**
- * ViewModel principal que coordina cámara, sensores y pipeline DSP. La UI sólo
- * lee StateFlows de este objeto y no tiene lógica clínica.
- */
-class MonitorViewModel(app: Application) : AndroidViewModel(app) {
+class MonitorViewModel(application: Application) : AndroidViewModel(application) {
 
-    private val cameraController = CameraController(app)
-    private val motionController = MotionSensorController(app)
+    private val camera = Camera2PpgController(application)
+    private val motionController = MotionSensorController(application)
     private val motionEstimator = MotionArtifactEstimator()
-    private val calibrationManager = DeviceCalibrationManager(app)
+    private val calibrationManager = DeviceCalibrationManager(application)
+    private var beatFeedback = BeatFeedbackController(application)
 
     private var pipeline: PpgPipeline? = null
     private var session: MeasurementSession? = null
@@ -58,11 +55,11 @@ class MonitorViewModel(app: Application) : AndroidViewModel(app) {
     val reading: StateFlow<VitalReading> = _reading.asStateFlow()
 
     private val _samples = MutableSharedFlow<PpgSample>(
-        replay = 0, extraBufferCapacity = 256, onBufferOverflow = BufferOverflow.DROP_OLDEST
+        replay = 0, extraBufferCapacity = 512, onBufferOverflow = BufferOverflow.DROP_OLDEST
     )
     val samples = _samples
 
-    private val _beats = MutableSharedFlow<BeatEvent>(
+    private val _beats = MutableSharedFlow<ConfirmedBeat>(
         replay = 0, extraBufferCapacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST
     )
     val beats = _beats
@@ -90,76 +87,105 @@ class MonitorViewModel(app: Application) : AndroidViewModel(app) {
 
     private val pendingCalibrationPoints = mutableListOf<CalibrationPoint>()
 
+    private val _feedbackAudioOn = MutableStateFlow(true)
+    val feedbackAudioOn: StateFlow<Boolean> = _feedbackAudioOn.asStateFlow()
+
+    private val _feedbackVibrationOn = MutableStateFlow(true)
+    val feedbackVibrationOn: StateFlow<Boolean> = _feedbackVibrationOn.asStateFlow()
+
+    fun setFeedbackAudio(enabled: Boolean) {
+        _feedbackAudioOn.value = enabled
+    }
+
+    fun setFeedbackVibration(enabled: Boolean) {
+        _feedbackVibrationOn.value = enabled
+    }
+
     fun start() {
         if (_running.value) return
-        if (!cameraController.hasCameraPermission()) return
+        if (!camera.hasCameraPermission()) return
+
+        beatFeedback.releaseQuietly()
+        beatFeedback = BeatFeedbackController(getApplication())
+
         _running.value = true
         viewModelScope.launch {
             try {
-                val config = cameraController.start(targetFps = 30)
-                _cameraConfig.value = config
-                _capabilities.value = cameraController.currentCapabilities()
-                val targetFps = config.targetFpsRange.second.coerceAtLeast(15)
-                val pipe = PpgPipeline(sampleRate = targetFps.toDouble())
+                val cfg = camera.start(targetFps = 30)
+                _cameraConfig.value = cfg
+                _capabilities.value = camera.currentCapabilities()
+                val tf = cfg.targetFpsRange.second.coerceAtLeast(15)
+
                 val s = MeasurementSession(
                     sessionId = UUID.randomUUID().toString(),
                     startEpochMs = System.currentTimeMillis(),
                     deviceModel = "${Build.MANUFACTURER} ${Build.MODEL}",
                     androidSdk = Build.VERSION.SDK_INT,
                     appVersion = BuildConfig.VERSION_NAME,
-                    algorithmVersion = "forensic-ppg-v1"
+                    algorithmVersion = "ppg-monitor-v2"
                 )
-                s.cameraId = config.cameraId
-                s.physicalCameraId = config.physicalCameraId
-                s.torchEnabled = config.torchEnabled
-                s.manualControlApplied = config.manualControlApplied
-                s.exposureTimeNs = config.manualExposureNs
-                s.iso = config.manualIso
-                s.frameDurationNs = config.manualFrameDurationNs
-                s.targetFps = targetFps
+                s.cameraId = cfg.cameraId
+                s.physicalCameraId = cfg.physicalCameraId
+                s.torchEnabled = cfg.torchEnabled
+                s.manualControlApplied = cfg.manualControlApplied
+                s.exposureTimeNs = cfg.manualExposureNs
+                s.iso = cfg.manualIso
+                s.frameDurationNs = cfg.manualFrameDurationNs
+                s.targetFps = tf
+
                 session = s
                 val trail = AuditTrail(s).also { auditTrail = it }
-                pipe.setTargetFps(targetFps)
+                trail.log(
+                    System.nanoTime(), MeasurementEvent.Kind.SESSION_START,
+                    "camera=${cfg.cameraId} fps=$tf manual=${cfg.manualControlApplied}"
+                )
+
+                val pipe = PpgPipeline(sampleRateHz = tf.toDouble(), auditTrail = trail)
+                pipe.reset()
                 pipeline = pipe
-                trail.log(System.nanoTime(), MeasurementEvent.Kind.SESSION_START,
-                    "Cámara=${config.cameraId} fps=${targetFps} manual=${config.manualControlApplied}")
-                _calibrationProfile.value = calibrationManager.findProfile(config.cameraId, null)
-                if (_calibrationProfile.value != null) {
-                    trail.log(System.nanoTime(), MeasurementEvent.Kind.CALIBRATION_APPLIED,
-                        "Perfil ${_calibrationProfile.value!!.profileId}")
-                } else {
-                    trail.log(System.nanoTime(), MeasurementEvent.Kind.CALIBRATION_MISSING,
-                        "Sin perfil para ${config.cameraId}")
-                }
+
+                _calibrationProfile.value = calibrationManager.findProfile(cfg.cameraId, null)
 
                 motionJob = motionController.stream()
                     .onEach { sample -> _motionScore.value = motionEstimator.push(sample) }
                     .launchIn(viewModelScope)
 
-                processingJob = cameraController.frameFlow
-                    .onEach { frame ->
+                processingJob = camera.frameFlow
+                    .onEach { raw ->
                         val motion = _motionScore.value
+                        val acq = PpgPipeline.AcquisitionMetrics(
+                            frameDrops = camera.frameDropCount(),
+                            measuredFpsHz = camera.measuredFpsEmaHz(),
+                            jitterMs = camera.frameJitterEmaMs(),
+                            torchEnabled = cfg.torchEnabled,
+                            manualSensorApplied = cfg.manualControlApplied,
+                            targetFpsHint = tf
+                        )
                         val step = withContext(Dispatchers.Default) {
-                            pipe.process(frame, motion, _calibrationProfile.value)
+                            pipe.process(raw, motion, _calibrationProfile.value, acq)
                         }
+
                         session?.let { ses ->
                             ses.framesTotal++
-                            if (step.acceptedFrame) ses.framesAccepted++ else ses.framesRejected++
+                            ses.framesAccepted++
                             ses.samples += step.sample
-                            step.beatEvent?.let { be ->
-                                ses.beats += be
-                                _beats.tryEmit(be)
+
+                            step.confirmedBeat?.let { b ->
+                                ses.beats += b
+                                _beats.tryEmit(b)
+                                viewModelScope.launch(Dispatchers.Main) {
+                                    beatFeedback.onConfirmedBeat(
+                                        b,
+                                        _feedbackAudioOn.value,
+                                        _feedbackVibrationOn.value
+                                    )
+                                }
                             }
                         }
+
                         _samples.tryEmit(step.sample)
                         _reading.value = step.reading
-                        _fps.value = pipe.fpsActual()
-                        auditTrail?.let { t ->
-                            if (step.sample.motionScore > 0.7) {
-                                t.log(frame.timestampNs, MeasurementEvent.Kind.MOTION_HIGH,
-                                    "motion=${"%.2f".format(step.sample.motionScore)}")
-                            }
-                        }
+                        _fps.value = camera.measuredFpsEmaHz()
                     }
                     .launchIn(viewModelScope)
             } catch (e: Exception) {
@@ -170,16 +196,28 @@ class MonitorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun stop() {
-        processingJob?.cancel(); processingJob = null
-        motionJob?.cancel(); motionJob = null
-        cameraController.stop()
+        processingJob?.cancel()
+        processingJob = null
+        motionJob?.cancel()
+        motionJob = null
+
+        val jitterSnap = camera.frameJitterEmaMs()
+        val fpsSnap = camera.measuredFpsEmaHz()
+
+        camera.stop()
+        pipeline = null
+
         _running.value = false
         session?.let { s ->
             s.endEpochMs = System.currentTimeMillis()
             val readings = s.samples.map { it.sqi }
             s.finalSqiMean = if (readings.isNotEmpty()) readings.average() else null
-            s.fpsActualMean = pipeline?.fpsActual() ?: 0.0
-            s.fpsJitterMs = pipeline?.fpsJitterMs() ?: 0.0
+            if (fpsSnap > 8.49) {
+                s.fpsActualMean = fpsSnap
+            } else if (_fps.value > 8.49) {
+                s.fpsActualMean = _fps.value
+            }
+            s.fpsJitterMs = jitterSnap
             auditTrail?.log(System.nanoTime(), MeasurementEvent.Kind.SESSION_END,
                 "samples=${s.samples.size} beats=${s.beats.size}")
         }
@@ -199,25 +237,25 @@ class MonitorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun clearExportMessage() { _exportMessage.value = null }
+    fun clearExportMessage() {
+        _exportMessage.value = null
+    }
 
     fun captureCalibrationPoint(referenceSpo2: Double) {
+        val pipe = pipeline ?: return
         val r = _reading.value
-        val latest = r.sqi
-        val pi = r.perfusionIndex
-        val m = r.motionScore
-        // Sólo aceptamos si la señal es estable y hay un ratio AC/DC válido
-        if (!r.isValid || latest < 0.55 || m > 0.25 || pi < 0.6) return
-        val tmp = pendingCalibrationPoints
-        // Ratio-of-ratios no está directamente expuesto; pedimos al estimador
-        // que compute una estimación de R a partir del estado actual.
-        tmp += CalibrationPoint(
+        if (referenceSpo2 !in 72.5..104.9) return
+        val ratio =
+            pipe.spo2Estimator.snapshotLastRatio()?.takeIf { it in 0.28..9.49 } ?: return
+        if (r.validityState.ordinal < PpgValidityState.PPG_VALID.ordinal) return
+        if (r.sqi < 0.52 || r.motionScore > 0.28 || r.perfusionIndex < 52.9) return
+        pendingCalibrationPoints += CalibrationPoint(
             capturedAtMs = System.currentTimeMillis(),
             referenceSpo2 = referenceSpo2,
-            ratioOfRatios = 0.9 + (100.0 - referenceSpo2) / 100.0,
-            sqi = latest,
-            perfusionIndex = pi,
-            motionScore = m
+            ratioOfRatios = ratio,
+            sqi = r.sqi,
+            perfusionIndex = (r.perfusionIndex.coerceAtMost(122.93) / 122.93).coerceAtLeast(0.32),
+            motionScore = r.motionScore
         )
     }
 
@@ -236,8 +274,10 @@ class MonitorViewModel(app: Application) : AndroidViewModel(app) {
         if (saved != null) {
             _calibrationProfile.value = saved
             session?.calibrationProfileId = saved.profileId
-            auditTrail?.log(System.nanoTime(), MeasurementEvent.Kind.CALIBRATION_APPLIED,
-                "Perfil ${saved.profileId} ajustado con ${saved.calibrationSamples} puntos")
+            auditTrail?.log(
+                System.nanoTime(), MeasurementEvent.Kind.CALIBRATION_APPLIED,
+                "perfil=${saved.profileId} pts=${saved.calibrationSamples}"
+            )
             pendingCalibrationPoints.clear()
         }
     }
@@ -246,6 +286,7 @@ class MonitorViewModel(app: Application) : AndroidViewModel(app) {
 
     override fun onCleared() {
         stop()
+        beatFeedback.releaseQuietly()
         super.onCleared()
     }
 

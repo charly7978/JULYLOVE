@@ -70,7 +70,7 @@ fun CalibrationScreen(
         Text("SQI: ${"%.2f".format(reading.sqi)}", color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
         Text("Perfusion Index: ${"%.2f".format(reading.perfusionIndex)}", color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
         Text("Motion Score: ${"%.2f".format(reading.motionScore)}", color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
-        Text("Estado: ${reading.state.labelEs()}", color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+        Text("Validez: ${reading.validityState.labelEs}", color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
 
         Spacer(Modifier.height(12.dp))
         OutlinedTextField(

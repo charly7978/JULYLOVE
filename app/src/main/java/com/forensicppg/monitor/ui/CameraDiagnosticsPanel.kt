@@ -19,12 +19,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.forensicppg.monitor.camera.CameraCapabilities
 import com.forensicppg.monitor.camera.CameraSessionConfig
+import com.forensicppg.monitor.domain.DiagnosticsSnapshot
 
 @Composable
 fun CameraDiagnosticsPanel(
     capabilities: CameraCapabilities?,
     config: CameraSessionConfig?,
     fpsActual: Double,
+    diagnostics: DiagnosticsSnapshot?,
     modifier: Modifier = Modifier
 ) {
     Box(
@@ -59,8 +61,35 @@ fun CameraDiagnosticsPanel(
                 Labeled("FPS real", "%.1f".format(fpsActual))
             }
             Row { Labeled("Resolución", config?.previewSize?.let { "${it.width}×${it.height}" } ?: "—") }
+
+            if (diagnostics != null) {
+                Spacer(Modifier.height(8.dp))
+                Text("TELEMETRÍA CAPTURA", color = Color(0xFFFFAA22), fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+                Spacer(Modifier.height(4.dp))
+                Row { Labeled("FPS medido", "%.2f Hz".format(diagnostics.measuredFps)) }
+                Row { Labeled("FPS esperado", diagnostics.targetFps.toString()) }
+                Row {
+                    Labeled("Frames perd.", diagnostics.frameDropCount.toString())
+                    Spacer(Modifier.fillMaxWidth(0.05f))
+                    Labeled("Jitter", "%.2f ms".format(diagnostics.frameJitterMeanMs))
+                }
+                Row { Labeled("Picos sí / no", "${diagnostics.peakConfirmedCountSession} / ${diagnostics.peakRejectedCountSession}") }
+                diagnostics.lastExposureNs?.let { Row { Labeled("Últ. exp(ns)", it.toString()) } }
+                diagnostics.lastIso?.let { Row { Labeled("Últ. ISO", it.toString()) } }
+                diagnostics.hardwareLimitNote?.takeIf { it.isNotBlank() }?.let { Row { Labeled("HW límit.", it.take(96)) } }
+                Row { Labeled("SpO₂ cal.", diagnostics.spo2CalibrationStatus.take(28)) }
+                LabeledDigest("Último digest rechazo:", diagnostics.lastRejectionDigest.take(240))
+                LabeledDigest("Ritmo:", diagnostics.rhythmDigest.take(180))
+            }
         }
     }
+}
+
+@Composable
+private fun LabeledDigest(label: String, value: String) {
+    Spacer(Modifier.height(6.dp))
+    Text(label, color = Color(0x99E6FFF4), fontFamily = FontFamily.Monospace, fontSize = 9.sp)
+    Text(value, color = Color(0xFFDDEEFF), fontFamily = FontFamily.Monospace, fontSize = 9.sp)
 }
 
 @Composable

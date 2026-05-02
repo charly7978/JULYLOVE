@@ -55,6 +55,15 @@ data class CameraCapabilities(
 
     val isBackFacing: Boolean get() = lensFacing == CameraCharacteristics.LENS_FACING_BACK
 
+    /** Resumen legible cuando el modo manual AE/AWB o flash no están completamente disponibles. */
+    fun hardwareHints(): String = buildString {
+        if (!supportsManualSensor) append("sensor_manual_limitado ")
+        if (!supportsAeLock) append("ae_lock_absente ")
+        if (!supportsAwbLock) append("wb_lock_absente ")
+        if (!hasFlash) append("flash_ausente ")
+        if ((rollingShutterSkewNs ?: 0L) > 35_000_000L) append("skew_elevado ")
+    }
+
     companion object {
         fun levelName(hardwareLevel: Int): String = when (hardwareLevel) {
             CameraMetadata.INFO_SUPPORTED_HARDWARE_LEVEL_3 -> "LEVEL_3"
