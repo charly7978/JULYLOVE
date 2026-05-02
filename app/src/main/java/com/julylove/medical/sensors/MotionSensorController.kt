@@ -402,13 +402,6 @@ class MotionSensorController(private val context: Context) : SensorEventListener
     }
     
     /**
-     * Obtiene la intensidad de movimiento actual
-     */
-    fun getCurrentMotionIntensity(): Double {
-        return currentAccelerationMagnitude.toDouble()
-    }
-    
-    /**
      * Verifica disponibilidad de sensores
      */
     fun getSensorAvailability(): SensorAvailability {

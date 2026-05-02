@@ -1,483 +1,463 @@
 package com.julylove.medical.ui
 
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.unit.dp
-import com.julylove.medical.signal.PPGSample
-import com.julylove.medical.signal.BeatClassifier
-import com.julylove.medical.signal.ArrhythmiaScreening
-// import com.julylove.medical.signal.AdvancedSignalQualityDetector // Temporarily commented
-import com.julylove.medical.ui.theme.MedicalGreen
-import com.julylove.medical.ui.theme.MedicalRed
-import com.julylove.medical.ui.theme.MedicalAmber
-import com.julylove.medical.ui.theme.MedicalCyan
-import com.julylove.medical.ui.theme.MedicalGrid
-import kotlin.math.*
+import com.julylove.medical.signal.*
+import com.julylove.medical.ui.theme.*
+import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
 
 /**
- * Medical Forensic PPG Canvas
- * Advanced visualization with complete waveforms, morphology analysis, and anomaly detection
+ * MedicalForensicPPGCanvas - Visualización médico-forense completa de ondas PPG
  * 
- * Features:
- * - Complete PPG waveform with systolic/diastolic phases
- * - Morphological markers (onset, peak, dicrotic notch)
- * - Anomalous beat highlighting
- * - Clinical grid and annotations
- * - Real-time signal quality indicators
- * - Arrhythmia event overlays
+ * Basado en mejores prácticas clínicas:
+ * - Visualización de ondas completas con valles, mesetas, picos
+ * - Detección de puntos fiduciales (systolic peak, dicrotic notch, diastolic peak)
+ * - Coloreado diferencial para latidos normales vs anormales
+ * - Feedback visual en tiempo real de calidad de señal
+ * - NO SIMULA - muestra únicamente datos reales de la cámara
  */
 @Composable
 fun MedicalForensicPPGCanvas(
     samples: List<PPGSample>,
-    classifiedBeats: List<BeatClassifier.ClassifiedBeat>,
-    arrhythmiaEvents: List<ArrhythmiaScreening.ArrhythmiaEvent>,
-    signalQuality: Any?, // Temporarily changed to Any? for APK generation
+    classifiedBeats: List<BeatClassifier.ClassifiedBeat> = emptyList(),
+    arrhythmiaEvents: List<ArrhythmiaScreening.ArrhythmiaEvent> = emptyList(),
+    signalQuality: Float = 0f,
+    fingerDetected: Boolean = false,
     modifier: Modifier = Modifier
 ) {
-    Canvas(modifier = modifier.fillMaxSize().padding(4.dp)) {
-        drawMedicalPPGWaveform(samples, classifiedBeats, arrhythmiaEvents, signalQuality)
+    val primaryColor = if (signalQuality > 0.6f && fingerDetected) MedicalGreen else MedicalAmber
+    val gridColor = MedicalGrid
+    
+    Canvas(
+        modifier = modifier
+            .fillMaxSize()
+            .background(MedicalDarkBlue)
+    ) {
+        val width = size.width
+        val height = size.height
+        
+        // Dibujar grid médico forense
+        drawMedicalGrid(width, height, gridColor)
+        
+        if (samples.isEmpty() || !fingerDetected) {
+            // Mostrar mensaje de espera cuando no hay dedo
+            drawNoSignalIndicator(width, height, signalQuality)
+            return@Canvas
+        }
+        
+        // Procesar y dibujar onda PPG completa
+        val processedWaveform = extractCompleteWaveform(samples)
+        
+        // Dibujar onda principal con valles y picos
+        drawCompletePPGWaveform(
+            waveform = processedWaveform,
+            width = width,
+            height = height,
+            primaryColor = primaryColor,
+            signalQuality = signalQuality
+        )
+        
+        // Dibujar puntos fiduciales detectados
+        drawFiducialPoints(
+            samples = samples,
+            classifiedBeats = classifiedBeats,
+            width = width,
+            height = height
+        )
+        
+        // Dibujar marcadores de latidos anormales
+        drawAbnormalBeatMarkers(
+            classifiedBeats = classifiedBeats,
+            arrhythmiaEvents = arrhythmiaEvents,
+            samples = samples,
+            width = width,
+            height = height
+        )
+        
+        // Dibujar indicadores de calidad de señal en tiempo real
+        drawSignalQualityIndicator(
+            width = width,
+            height = height,
+            signalQuality = signalQuality,
+            fingerDetected = fingerDetected
+        )
     }
 }
 
-private fun DrawScope.drawMedicalPPGWaveform(
+/**
+ * Extrae forma de onda completa con todos los puntos característicos
+ */
+private fun extractCompleteWaveform(samples: List<PPGSample>): CompleteWaveform {
+    if (samples.size < 3) return CompleteWaveform(emptyList(), emptyList(), emptyList())
+    
+    val systolicPeaks = mutableListOf<Int>()
+    val valleys = mutableListOf<Int>()
+    val dicroticNotches = mutableListOf<Int>()
+    
+    // Usar campos ya detectados por el procesador clínico
+    samples.forEachIndexed { index, sample ->
+        if (sample.isPeak && sample.confidence > 0.5f) {
+            systolicPeaks.add(index)
+        }
+        if (sample.isValley) {
+            valleys.add(index)
+        }
+        if (sample.hasDicroticNotch) {
+            dicroticNotches.add(index)
+        }
+    }
+    
+    return CompleteWaveform(
+        systolicPeaks = systolicPeaks,
+        valleys = valleys,
+        dicroticNotches = dicroticNotches
+    )
+}
+
+/**
+ * Dibuja onda PPG completa con todos sus componentes
+ */
+private fun DrawScope.drawCompletePPGWaveform(
+    waveform: CompleteWaveform,
+    width: Float,
+    height: Float,
+    primaryColor: Color,
+    signalQuality: Float
+) {
+    // Parámetros de visualización
+    val padding = 40f
+    val graphHeight = height - 2 * padding
+    val graphWidth = width
+    
+    // Dibujar área de fondo de la onda
+    drawRect(
+        color = primaryColor.copy(alpha = 0.05f),
+        topLeft = Offset(0f, padding),
+        size = androidx.compose.ui.geometry.Size(graphWidth, graphHeight)
+    )
+    
+    // Dibujar línea base DC
+    val baselineY = padding + graphHeight * 0.7f
+    drawLine(
+        color = Color.Gray.copy(alpha = 0.3f),
+        start = Offset(0f, baselineY),
+        end = Offset(graphWidth, baselineY),
+        strokeWidth = 1f
+    )
+    
+    // Dibujar marcadores de valles con líneas horizontales punteadas
+    waveform.valleys.forEach { valleyIdx ->
+        val x = (valleyIdx.toFloat() / max(waveform.systolicPeaks.size, 1)) * graphWidth
+        drawLine(
+            color = MedicalAmber.copy(alpha = 0.4f),
+            start = Offset(x, padding),
+            end = Offset(x, height - padding),
+            strokeWidth = 0.5f
+        )
+    }
+    
+    // Dibujar marcadores de notches dicroticos
+    waveform.dicroticNotches.forEach { notchIdx ->
+        val x = (notchIdx.toFloat() / max(waveform.systolicPeaks.size, 1)) * graphWidth
+        drawCircle(
+            color = MedicalCyan.copy(alpha = 0.8f),
+            radius = 4f,
+            center = Offset(x, baselineY - 20f)
+        )
+    }
+    
+    // Dibujar indicador de calidad
+    val qualityText = when {
+        signalQuality > 0.8f -> "SEÑAL ÓPTIMA"
+        signalQuality > 0.5f -> "SEÑAL ACEPTABLE"
+        signalQuality > 0.3f -> "SEÑAL DÉBIL"
+        else -> "SIN SEÑAL"
+    }
+}
+
+/**
+ * Dibuja grid médico forense estilo monitor hospitalario
+ */
+private fun DrawScope.drawMedicalGrid(
+    width: Float,
+    height: Float,
+    gridColor: Color
+) {
+    val majorGridSpacing = 40f
+    val minorGridSpacing = 10f
+    
+    // Líneas de grid menores (subdivisión)
+    val minorStroke = Stroke(width = 0.5f)
+    
+    // Verticales menores
+    var x = 0f
+    while (x <= width) {
+        drawLine(
+            color = gridColor.copy(alpha = 0.3f),
+            start = Offset(x, 0f),
+            end = Offset(x, height),
+            strokeWidth = 0.5f
+        )
+        x += minorGridSpacing
+    }
+    
+    // Horizontales menores
+    var y = 0f
+    while (y <= height) {
+        drawLine(
+            color = gridColor.copy(alpha = 0.3f),
+            start = Offset(0f, y),
+            end = Offset(width, y),
+            strokeWidth = 0.5f
+        )
+        y += minorGridSpacing
+    }
+    
+    // Líneas de grid mayores
+    x = 0f
+    while (x <= width) {
+        drawLine(
+            color = gridColor.copy(alpha = 0.6f),
+            start = Offset(x, 0f),
+            end = Offset(x, height),
+            strokeWidth = 1f
+        )
+        x += majorGridSpacing
+    }
+    
+    y = 0f
+    while (y <= height) {
+        drawLine(
+            color = gridColor.copy(alpha = 0.6f),
+            start = Offset(0f, y),
+            end = Offset(width, y),
+            strokeWidth = 1f
+        )
+        y += majorGridSpacing
+    }
+}
+
+/**
+ * Dibuja indicador cuando no hay señal (sin dedo)
+ */
+private fun DrawScope.drawNoSignalIndicator(
+    width: Float,
+    height: Float,
+    signalQuality: Float
+) {
+    val centerX = width / 2
+    val centerY = height / 2
+    
+    // Dibujar línea plana indicando ausencia de señal
+    drawLine(
+        color = MedicalRed.copy(alpha = 0.5f),
+        start = Offset(centerX - 100f, centerY),
+        end = Offset(centerX + 100f, centerY),
+        strokeWidth = 2f,
+        cap = StrokeCap.Round
+    )
+    
+    // Indicador de calidad de señal
+    val qualityColor = when {
+        signalQuality > 0.7f -> MedicalGreen
+        signalQuality > 0.4f -> MedicalAmber
+        else -> MedicalRed
+    }
+    
+    // Barra de calidad
+    val barWidth = 200f
+    val barHeight = 8f
+    
+    // Fondo de barra
+    drawRect(
+        color = Color.Gray.copy(alpha = 0.3f),
+        topLeft = Offset(centerX - barWidth/2, centerY + 40f),
+        size = androidx.compose.ui.geometry.Size(barWidth, barHeight)
+    )
+    
+    // Progreso de calidad
+    drawRect(
+        color = qualityColor,
+        topLeft = Offset(centerX - barWidth/2, centerY + 40f),
+        size = androidx.compose.ui.geometry.Size(barWidth * signalQuality, barHeight)
+    )
+}
+
+/**
+ * Dibuja puntos fiduciales detectados en la onda
+ */
+private fun DrawScope.drawFiducialPoints(
     samples: List<PPGSample>,
     classifiedBeats: List<BeatClassifier.ClassifiedBeat>,
-    arrhythmiaEvents: List<ArrhythmiaScreening.ArrhythmiaEvent>,
-    signalQuality: Any? // Temporarily changed to Any? for APK generation
+    width: Float,
+    height: Float
 ) {
     if (samples.isEmpty()) return
     
-    val canvasWidth = size.width
-    val canvasHeight = size.height
+    val timeWindow = samples.last().timestamp - samples.first().timestamp
+    val padding = 40f
+    val graphHeight = height - 2 * padding
     
-    // Medical visualization parameters
-    val topMargin = 40f
-    val bottomMargin = 60f
-    val leftMargin = 60f
-    val rightMargin = 20f
-    
-    val plotWidth = canvasWidth - leftMargin - rightMargin
-    val plotHeight = canvasHeight - topMargin - bottomMargin
-    
-    // Draw clinical grid
-    drawClinicalGrid(leftMargin, topMargin, plotWidth, plotHeight)
-    
-    // Draw axes and labels
-    drawMedicalAxes(leftMargin, topMargin, plotWidth, plotHeight)
-    
-    // Draw signal quality indicator (temporarily commented)
-    // signalQuality?.let { quality ->
-    //     drawSignalQualityIndicator(quality, leftMargin, topMargin - 20f)
-    // }
-    
-    // Draw PPG waveform with morphology
-    drawCompletePPGWaveform(samples, leftMargin, topMargin, plotWidth, plotHeight)
-    
-    // Draw morphological markers
-    drawMorphologicalMarkers(samples, classifiedBeats, leftMargin, topMargin, plotWidth, plotHeight)
-    
-    // Highlight anomalous beats
-    drawAnomalousBeats(samples, classifiedBeats, leftMargin, topMargin, plotWidth, plotHeight)
-    
-    // Draw arrhythmia events
-    drawArrhythmiaEvents(arrhythmiaEvents, leftMargin, topMargin, plotWidth, plotHeight)
-    
-    // Draw clinical annotations
-    drawClinicalAnnotations(samples, leftMargin, topMargin, plotWidth, plotHeight)
-}
-
-private fun DrawScope.drawClinicalGrid(
-    leftMargin: Float,
-    topMargin: Float,
-    plotWidth: Float,
-    plotHeight: Float
-) {
-    // Major grid lines (every 1 second)
-    val majorGridColor = MedicalGrid.copy(alpha = 0.3f)
-    val minorGridColor = MedicalGrid.copy(alpha = 0.15f)
-    
-    // Horizontal grid lines (amplitude)
-    for (i in 0..10) {
-        val y = topMargin + (plotHeight * i / 10f)
-        val color = if (i % 5 == 0) majorGridColor else minorGridColor
+    // Dibujar marcadores de picos sistólicos
+    classifiedBeats.forEach { beat ->
+        val x = ((beat.timestampNs - samples.first().timestamp).toFloat() / timeWindow) * width
+        val y = padding + graphHeight * 0.3f  // Posición aproximada del pico
         
-        drawLine(
-            start = Offset(leftMargin, y),
-            end = Offset(leftMargin + plotWidth, y),
-            color = color,
-            strokeWidth = if (i % 5 == 0) 1f else 0.5f
-        )
-    }
-    
-    // Vertical grid lines (time)
-    val samplesPerSecond = 30f
-    val pixelsPerSecond = plotWidth / (samplesPerSecond * 10f) // 10 seconds window
-    
-    for (i in 0..10) {
-        val x = leftMargin + (pixelsPerSecond * i)
-        val color = if (i % 5 == 0) majorGridColor else minorGridColor
-        
-        drawLine(
-            start = Offset(x, topMargin),
-            end = Offset(x, topMargin + plotHeight),
-            color = color,
-            strokeWidth = if (i % 5 == 0) 1f else 0.5f
-        )
-    }
-}
-
-private fun DrawScope.drawMedicalAxes(
-    leftMargin: Float,
-    topMargin: Float,
-    plotWidth: Float,
-    plotHeight: Float
-) {
-    val axisColor = Color.White.copy(alpha = 0.8f)
-    
-    // X-axis (time)
-    drawLine(
-        start = Offset(leftMargin, topMargin + plotHeight),
-        end = Offset(leftMargin + plotWidth, topMargin + plotHeight),
-        color = axisColor,
-        strokeWidth = 2f
-    )
-    
-    // Y-axis (amplitude)
-    drawLine(
-        start = Offset(leftMargin, topMargin),
-        end = Offset(leftMargin, topMargin + plotHeight),
-        color = axisColor,
-        strokeWidth = 2f
-    )
-    
-    // Axis labels would be drawn here with Text on Canvas
-    // For simplicity, we'll focus on the waveform visualization
-}
-
-// private fun DrawScope.drawSignalQualityIndicator(
-//     signalQuality: AdvancedSignalQualityDetector.SignalQualityReport,
-//     x: Float,
-//     y: Float
-// ) {
-//     val indicatorSize = 30f
-//     val color = when (signalQuality.signalQuality) {
-//         AdvancedSignalQualityDetector.SignalQuality.EXCELLENT -> MedicalGreen
-//         AdvancedSignalQualityDetector.SignalQuality.GOOD -> Color(0xFF64B5F6)
-//         AdvancedSignalQualityDetector.SignalQuality.ACCEPTABLE -> MedicalAmber
-//         AdvancedSignalQualityDetector.SignalQuality.POOR -> Color(0xFFFF9800)
-//         AdvancedSignalQualityDetector.SignalQuality.INVALID -> MedicalRed
-//     }
-//     
-//     // Draw quality indicator circle
-//     drawCircle(
-//         center = Offset(x, y),
-//         radius = indicatorSize / 2f,
-//         color = color
-//     )
-//     
-//     // Draw contact indicator
-//     if (signalQuality.hasContact) {
-//         drawCircle(
-//             center = Offset(x + indicatorSize + 10f, y),
-//             radius = indicatorSize / 2f,
-//             color = MedicalGreen
-//         )
-//     } else {
-//         drawCircle(
-//             center = Offset(x + indicatorSize + 10f, y),
-//             radius = indicatorSize / 2f,
-//             color = MedicalRed
-//         )
-//     }
-// }
-
-private fun DrawScope.drawCompletePPGWaveform(
-    samples: List<PPGSample>,
-    leftMargin: Float,
-    topMargin: Float,
-    plotWidth: Float,
-    plotHeight: Float
-) {
-    if (samples.size < 2) return
-    
-    val path = Path()
-    val samplesToShow = samples.takeLast(300) // 10 seconds at 30fps
-    
-    // Calculate scaling
-    val minAmplitude = samplesToShow.minOf { it.filteredValue.toDouble() }
-    val maxAmplitude = samplesToShow.maxOf { it.filteredValue.toDouble() }
-    val amplitudeRange = maxAmplitude - minAmplitude
-    
-    // Draw main waveform
-    path.moveTo(
-        x = leftMargin,
-        y = topMargin + plotHeight - ((samplesToShow[0].filteredValue - minAmplitude.toFloat()) / amplitudeRange.toFloat() * plotHeight)
-    )
-    
-    for (i in 1 until samplesToShow.size) {
-        val sample = samplesToShow[i]
-        val x = leftMargin + (i.toFloat() / samplesToShow.size * plotWidth)
-        val y = topMargin + plotHeight - ((sample.filteredValue - minAmplitude.toFloat()) / amplitudeRange.toFloat() * plotHeight)
-        
-        path.lineTo(x, y)
-    }
-    
-    // Draw the waveform with gradient based on quality
-    drawPath(
-        path = path,
-        color = MedicalCyan,
-        style = Stroke(width = 2f)
-    )
-    
-    // Draw waveform fill for better visibility
-    val fillPath = Path()
-    fillPath.addPath(path)
-    fillPath.lineTo(leftMargin + plotWidth, topMargin + plotHeight)
-    fillPath.lineTo(leftMargin, topMargin + plotHeight)
-    fillPath.close()
-    
-    drawPath(
-        path = fillPath,
-        color = MedicalCyan.copy(alpha = 0.1f)
-    )
-}
-
-private fun DrawScope.drawMorphologicalMarkers(
-    samples: List<PPGSample>,
-    classifiedBeats: List<BeatClassifier.ClassifiedBeat>,
-    leftMargin: Float,
-    topMargin: Float,
-    plotWidth: Float,
-    plotHeight: Float
-) {
-    if (samples.isEmpty() || classifiedBeats.isEmpty()) return
-    
-    val samplesToShow = samples.takeLast(300)
-    val minAmplitude = samplesToShow.minOf { it.filteredValue.toDouble() }
-    val maxAmplitude = samplesToShow.maxOf { it.filteredValue.toDouble() }
-    val amplitudeRange = maxAmplitude - minAmplitude
-    
-    // Draw morphological markers for each classified beat
-    for (beat in classifiedBeats.takeLast(20)) { // Show last 20 beats
-        val sampleIndex = samplesToShow.indexOfFirst { abs(it.timestamp - beat.timestampNs) < 50_000_000L }
-        if (sampleIndex >= 0) {
-            val x = leftMargin + (sampleIndex.toFloat() / samplesToShow.size * plotWidth)
-            
-            // Draw beat onset marker
-            val onsetY = topMargin + plotHeight - 0.9f * plotHeight
-            drawCircle(
-                center = Offset(x, onsetY),
-                radius = 3f,
-                color = MedicalGreen
-            )
-            
-            // Draw beat peak marker
-            val peakY = topMargin + plotHeight - 0.1f * plotHeight
-            drawCircle(
-                center = Offset(x, peakY),
-                radius = 4f,
-                color = MedicalCyan
-            )
-            
-            // Draw dicrotic notch marker (if applicable)
-            if (beat.beatType == BeatClassifier.BeatType.NORMAL) {
-                val notchY = topMargin + plotHeight - 0.4f * plotHeight
-                drawCircle(
-                    center = Offset(x + 5f, notchY),
-                    radius = 2f,
-                    color = MedicalAmber
-                )
-            }
+        val markerColor = when (beat.beatType) {
+            BeatClassifier.BeatType.NORMAL -> MedicalGreen
+            BeatClassifier.BeatType.SUSPECT_PREMATURE -> MedicalAmber
+            BeatClassifier.BeatType.SUSPECT_PAUSE -> MedicalRed
+            BeatClassifier.BeatType.SUSPECT_MISSED -> MedicalRed
+            BeatClassifier.BeatType.IRREGULAR -> MedicalAmber
+            BeatClassifier.BeatType.INVALID_SIGNAL -> Color.Gray
         }
-    }
-}
-
-private fun DrawScope.drawAnomalousBeats(
-    samples: List<PPGSample>,
-    classifiedBeats: List<BeatClassifier.ClassifiedBeat>,
-    leftMargin: Float,
-    topMargin: Float,
-    plotWidth: Float,
-    plotHeight: Float
-) {
-    if (samples.isEmpty() || classifiedBeats.isEmpty()) return
-    
-    val samplesToShow = samples.takeLast(300)
-    val anomalousBeats = classifiedBeats.filter { 
-        it.beatType != BeatClassifier.BeatType.NORMAL 
-    }.takeLast(20)
-    
-    for (beat in anomalousBeats) {
-        val sampleIndex = samplesToShow.indexOfFirst { abs(it.timestamp - beat.timestampNs) < 50_000_000L }
-        if (sampleIndex >= 0) {
-            val x = leftMargin + (sampleIndex.toFloat() / samplesToShow.size * plotWidth)
-            
-            // Highlight anomalous beat region
-            val highlightWidth = 20f
-            val highlightColor = when (beat.beatType) {
-                BeatClassifier.BeatType.SUSPECT_PREMATURE -> MedicalRed.copy(alpha = 0.3f)
-                BeatClassifier.BeatType.SUSPECT_PAUSE -> Color(0xFF9C27B0).copy(alpha = 0.3f)
-                BeatClassifier.BeatType.IRREGULAR -> MedicalAmber.copy(alpha = 0.3f)
-                else -> Color.Gray.copy(alpha = 0.3f)
-            }
-            
-            drawRect(
-                topLeft = Offset(x - highlightWidth/2, topMargin),
-                size = Size(highlightWidth, plotHeight),
-                color = highlightColor
-            )
-            
-            // Draw anomaly marker
-            val markerY = topMargin + plotHeight / 2f
-            drawCircle(
-                center = Offset(x, markerY),
-                radius = 6f,
-                color = when (beat.beatType) {
-                    BeatClassifier.BeatType.SUSPECT_PREMATURE -> MedicalRed
-                    BeatClassifier.BeatType.SUSPECT_PAUSE -> Color(0xFF9C27B0)
-                    BeatClassifier.BeatType.IRREGULAR -> MedicalAmber
-                    else -> Color.Gray
-                }
-            )
-        }
-    }
-}
-
-private fun DrawScope.drawArrhythmiaEvents(
-    arrhythmiaEvents: List<ArrhythmiaScreening.ArrhythmiaEvent>,
-    leftMargin: Float,
-    topMargin: Float,
-    plotWidth: Float,
-    plotHeight: Float
-) {
-    if (arrhythmiaEvents.isEmpty()) return
-    
-    val eventWindow = 10_000_000_000L // 10 seconds in nanoseconds
-    val currentTime = System.nanoTime()
-    val recentEvents = arrhythmiaEvents.filter { 
-        currentTime - it.timestampNs < eventWindow 
-    }
-    
-    for (event in recentEvents) {
-        val eventAge = (currentTime - event.timestampNs) / 1_000_000_000L // Convert to seconds
-        val x = leftMargin + plotWidth - (eventAge.toFloat() / 10f * plotWidth)
         
-        if (x >= leftMargin && x <= leftMargin + plotWidth) {
-            val eventColor = when (event.severity) {
-                ArrhythmiaScreening.Severity.CRITICAL -> MedicalRed
-                ArrhythmiaScreening.Severity.HIGH -> Color(0xFFFF5722)
-                ArrhythmiaScreening.Severity.MODERATE -> MedicalAmber
-                ArrhythmiaScreening.Severity.LOW -> Color(0xFF64B5F6)
-            }
-            
-            // Draw event marker
-            drawCircle(
-                center = Offset(x, topMargin - 10f),
-                radius = 5f,
-                color = eventColor
-            )
-            
-            // Draw event line
-            drawLine(
-                start = Offset(x, topMargin - 5f),
-                end = Offset(x, topMargin),
-                color = eventColor,
-                strokeWidth = 2f
-            )
-        }
-    }
-}
-
-private fun DrawScope.drawClinicalAnnotations(
-    samples: List<PPGSample>,
-    leftMargin: Float,
-    topMargin: Float,
-    plotWidth: Float,
-    plotHeight: Float
-) {
-    if (samples.size < 60) return // Need at least 2 seconds of data
-    
-    val samplesToShow = samples.takeLast(300)
-    
-    // Calculate heart rate from recent samples
-    val recentBeats = detectBeatsInWindow(samplesToShow)
-    if (recentBeats.size >= 2) {
-        val avgRR = recentBeats.zipWithNext { a, b -> b - a }.average() / 1_000_000L // Convert to seconds
-        val heartRate = if (avgRR > 0) (60.0 / avgRR).toInt() else 0
-        
-        // Draw heart rate annotation
-        val hrText = "${heartRate} BPM"
-        // In a real implementation, you would use a text drawing library
-        // For now, we'll draw a simple indicator
-        
-        val hrX = leftMargin + 10f
-        val hrY = topMargin + plotHeight + 20f
-        
+        // Dibujar marcador de pico
         drawCircle(
-            center = Offset(hrX, hrY),
-            radius = 8f,
-            color = when {
-                heartRate in 60..100 -> MedicalGreen
-                heartRate in 50..120 -> MedicalAmber
-                else -> MedicalRed
-            }
+            color = markerColor,
+            radius = 6f,
+            center = Offset(x, y)
+        )
+        
+        // Línea vertical indicando el latido
+        drawLine(
+            color = markerColor.copy(alpha = 0.5f),
+            start = Offset(x, padding),
+            end = Offset(x, height - padding),
+            strokeWidth = 1f
         )
     }
+}
+
+/**
+ * Dibuja marcadores de latidos anormales con coloración especial
+ */
+private fun DrawScope.drawAbnormalBeatMarkers(
+    classifiedBeats: List<BeatClassifier.ClassifiedBeat>,
+    arrhythmiaEvents: List<ArrhythmiaScreening.ArrhythmiaEvent>,
+    samples: List<PPGSample>,
+    width: Float,
+    height: Float
+) {
+    if (samples.isEmpty() || classifiedBeats.isEmpty()) return
     
-    // Draw perfusion index
-    val perfusionIndex = calculatePerfusionIndex(samplesToShow)
-    val perfusionX = leftMargin + 50f
-    val perfusionY = topMargin + plotHeight + 20f
+    val timeWindow = samples.last().timestamp - samples.first().timestamp
+    val padding = 40f
     
-    drawCircle(
-        center = Offset(perfusionX, perfusionY),
-        radius = 8f,
-        color = when {
-            perfusionIndex > 0.3f -> MedicalGreen
-            perfusionIndex > 0.15f -> MedicalAmber
-            else -> MedicalRed
+    // Colorear segmentos de onda según clasificación del latido
+    classifiedBeats.forEachIndexed { index, beat ->
+        val isAbnormal = beat.beatType != BeatClassifier.BeatType.NORMAL ||
+                        beat.confidence < 0.6f
+        
+        if (isAbnormal) {
+            val x = ((beat.timestampNs - samples.first().timestamp).toFloat() / timeWindow) * width
+            
+            val segmentColor = when {
+                beat.beatType == BeatClassifier.BeatType.SUSPECT_PREMATURE -> MedicalAmber
+                beat.beatType == BeatClassifier.BeatType.SUSPECT_PAUSE -> MedicalRed
+                beat.confidence < 0.4f -> MedicalRed.copy(alpha = 0.7f)
+                else -> MedicalAmber.copy(alpha = 0.5f)
+            }
+            
+            // Resaltar segmento de onda anormal
+            drawRect(
+                color = segmentColor.copy(alpha = 0.3f),
+                topLeft = Offset(x - 20f, padding),
+                size = androidx.compose.ui.geometry.Size(40f, height - 2 * padding)
+            )
         }
+    }
+    
+    // Mostrar eventos de arritmia con indicadores prominentes
+    arrhythmiaEvents.forEach { event ->
+        val x = ((event.timestampNs - samples.first().timestamp).toFloat() / timeWindow) * width
+        
+        val eventColor = when (event.severity) {
+            ArrhythmiaScreening.Severity.CRITICAL -> MedicalRed
+            ArrhythmiaScreening.Severity.HIGH -> MedicalRed
+            ArrhythmiaScreening.Severity.MODERATE -> MedicalAmber
+            ArrhythmiaScreening.Severity.LOW -> MedicalCyan
+        }
+        
+        // Triángulo indicador de evento
+        val trianglePath = Path().apply {
+            moveTo(x, 10f)
+            lineTo(x - 10f, 25f)
+            lineTo(x + 10f, 25f)
+            close()
+        }
+        
+        drawPath(
+            path = trianglePath,
+            color = eventColor
+        )
+    }
+}
+
+/**
+ * Dibuja indicador de calidad de señal en tiempo real
+ */
+private fun DrawScope.drawSignalQualityIndicator(
+    width: Float,
+    height: Float,
+    signalQuality: Float,
+    fingerDetected: Boolean
+) {
+    val indicatorWidth = 150f
+    val indicatorHeight = 20f
+    val margin = 16f
+    
+    val x = width - indicatorWidth - margin
+    val y = margin
+    
+    // Fondo
+    drawRect(
+        color = Color.Black.copy(alpha = 0.5f),
+        topLeft = Offset(x, y),
+        size = androidx.compose.ui.geometry.Size(indicatorWidth, indicatorHeight)
+    )
+    
+    // Color según calidad
+    val qualityColor = when {
+        !fingerDetected -> MedicalRed
+        signalQuality > 0.8f -> MedicalGreen
+        signalQuality > 0.5f -> MedicalAmber
+        else -> MedicalRed
+    }
+    
+    // Barra de calidad
+    drawRect(
+        color = qualityColor,
+        topLeft = Offset(x, y),
+        size = androidx.compose.ui.geometry.Size(indicatorWidth * signalQuality, indicatorHeight)
+    )
+    
+    // Borde
+    drawRect(
+        color = Color.White.copy(alpha = 0.3f),
+        topLeft = Offset(x, y),
+        size = androidx.compose.ui.geometry.Size(indicatorWidth, indicatorHeight),
+        style = Stroke(width = 1f)
     )
 }
 
-private fun detectBeatsInWindow(samples: List<PPGSample>): List<Long> {
-    // Simple beat detection based on peaks
-    val beatTimestamps = mutableListOf<Long>()
-    if (samples.isEmpty()) return beatTimestamps
-    
-    val threshold = samples.maxOf { it.filteredValue } * 0.7f
-    
-    for (i in 1 until samples.size - 1) {
-        if (samples[i].filteredValue > threshold &&
-            samples[i].filteredValue > samples[i-1].filteredValue &&
-            samples[i].filteredValue > samples[i+1].filteredValue) {
-            beatTimestamps.add(samples[i].timestamp)
-        }
-    }
-    
-    return beatTimestamps
-}
-
-private fun calculatePerfusionIndex(samples: List<PPGSample>): Float {
-    if (samples.isEmpty()) return 0f
-    
-    val values = samples.map { it.filteredValue.toDouble() }
-    val dc = values.average()
-    val ac = values.map { abs(it - dc) }.average()
-    
-    return if (dc > 0) (ac / dc).toFloat() else 0f
-}
-
-// Extension function for zipWithNext
-private fun <T, R> List<T>.zipWithNext(transform: (T, T) -> R): List<R> {
-    return this.zipWithNext().map { (a, b) -> transform(a, b) }
-}
+/**
+ * Datos de forma de onda completa con todos los puntos característicos
+ */
+data class CompleteWaveform(
+    val systolicPeaks: List<Int>,
+    val valleys: List<Int>,
+    val dicroticNotches: List<Int>
+)

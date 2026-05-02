@@ -4,6 +4,7 @@ import androidx.compose.ui.graphics.Color
 
 val MedicalBlack = Color(0xFF050505)
 val MedicalDarkGray = Color(0xFF121212)
+val MedicalDarkBlue = Color(0xFF0A1628)  // Fondo azul oscuro médico
 val MedicalGreen = Color(0xFF00FF41) // Matrix/Medical Green
 val MedicalRed = Color(0xFFFF0033)
 val MedicalAmber = Color(0xFFFFB000)

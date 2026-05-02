@@ -51,7 +51,7 @@ class ArrhythmiaScreening {
         LOW,      // Leve, monitoreo continuo
         MODERATE, // Moderado, requiere atención
         HIGH,     // Alto, requiere evaluación
-        CRITICAL  // Crítico, acción inmediata
+        CRITICAL  // Crítico, requiere atención inmediata
     }
     
     /**

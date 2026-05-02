@@ -135,13 +135,19 @@ fun FullScreenMonitor(viewModel: MonitorViewModel) {
         .fillMaxSize()
         .background(MedicalBlack)) {
         
-        // 1. MONITOR CARDIACO MÉDICO FORENSE AVANZADO (Background Layer)
+        // 1. MONITOR CARDIACO FULL SCREEN FORENSE (Background Layer)
         if (!state.showCalibrationScreen) {
             MedicalForensicPPGCanvas(
                 samples = state.ppgSamples,
                 classifiedBeats = state.classifiedBeats,
                 arrhythmiaEvents = state.arrhythmiaEvents,
-                signalQuality = state.advancedSignalQuality,
+                signalQuality = when(state.signalQuality) {
+                    SignalQuality.EXCELLENT -> 0.9f
+                    SignalQuality.GOOD -> 0.7f
+                    SignalQuality.ACCEPTABLE -> 0.5f
+                    else -> 0.2f
+                },
+                fingerDetected = state.fingerPresent,
                 modifier = Modifier.fillMaxSize()
             )
         } else {
@@ -226,44 +232,26 @@ fun FullScreenMonitor(viewModel: MonitorViewModel) {
             StatusBadge(state.rhythmStatus)
         }
 
-        // Clinical Forensic Telemetry Panel (Bottom Left)
+        // Technical Telemetry Panel (Bottom Left)
         if (showTelemetry) {
             Box(
                 modifier = Modifier
                     .align(Alignment.BottomStart)
                     .padding(20.dp)
-                    .width(280.dp)
+                    .width(240.dp)
                     .background(MedicalDarkGray.copy(alpha = 0.85f))
                     .padding(12.dp)
             ) {
                 Column {
-                    Text("ANÁLISIS_CLÍNICO_FORENSE", style = Typography.labelSmall, color = MedicalCyan, fontWeight = FontWeight.Bold)
+                    Text("ANÁLISIS_FORENSE", style = Typography.labelSmall, color = MedicalCyan, fontWeight = FontWeight.Bold)
                     Spacer(modifier = Modifier.height(8.dp))
                     
-                    // Indicadores Clínicos Principales
-                    TechnicalValue("CONTACTO", state.contactStatus)
-                    TechnicalValue("VALIDEZ_MÉDICA", translateClinicalValidity(state.medicalValidity))
-                    TechnicalValue("CALIDAD_SEÑAL", "${(state.clinicalMetrics.signalQualityIndex * 100).toInt()}%")
-                    TechnicalValue("PERFUSIÓN", "${(state.clinicalMetrics.perfusionIndex * 100).toInt()}%")
-                    TechnicalValue("SNR_RATIO", "${state.clinicalMetrics.snrRatio.toInt()}dB")
-                    
-                    Spacer(modifier = Modifier.height(8.dp))
-                    
-                    // Métricas Morfológicas
-                    TechnicalValue("MORFOLOGÍA", "${(state.clinicalMetrics.morphologyScore * 100).toInt()}%")
-                    TechnicalValue("LATIDOS_ANORMALES", "${state.clinicalMetrics.abnormalBeats}")
-                    TechnicalValue("ARRITMIAS", "${state.clinicalMetrics.arrhythmiaCount}")
-                    
-                    Spacer(modifier = Modifier.height(8.dp))
-                    
-                    // Estado de Procesamiento
-                    state.processedSignal?.let { signal ->
-                        TechnicalValue("RUIDO", "${signal.noiseLevel.toInt()}")
-                        TechnicalValue("BASELINE", "${signal.baselineLevel.toInt()}")
-                    }
-                    
-                    // Picos Clínicos Detectados
-                    // TechnicalValue("PICOS_CLÍNICOS", "${state.clinicalPeaks.size}") // Temporarily commented
+                    // Indicadores Forenses Principales
+                    TechnicalValue("PRESENCIA_DEDO", if (state.fingerPresent) "DETECTADO" else "AUSENTE")
+                    TechnicalValue("SEÑAL_VALIDA", if (state.signalValid) "VÁLIDA" else "INVÁLIDA")
+                    TechnicalValue("CALIDAD_SEÑAL", translateSignalQuality(state.signalQuality))
+                    TechnicalValue("TIPO_ONDA", translateWaveType(state.waveformType))
+                    TechnicalValue("CONFIANZA", "${(state.detectionConfidence * 100).toInt()}%")
                     
                     Spacer(modifier = Modifier.height(8.dp))
                     
@@ -279,12 +267,16 @@ fun FullScreenMonitor(viewModel: MonitorViewModel) {
                         state.technicalData.sampleEntropy?.let { "%.3f".format(it) } ?: "—"
                     )
                     
-                    // Anomalías Detectadas (usando nuevas métricas clínicas)
-                    if (state.clinicalMetrics.abnormalBeats > 0) {
+                    // Anomalías Detectadas
+                    if (state.abnormalities.isNotEmpty()) {
                         Spacer(modifier = Modifier.height(8.dp))
                         Text("ANOMALÍAS", style = Typography.labelSmall, color = MedicalRed, fontWeight = FontWeight.Bold)
-                        TechnicalValue("LATIDOS_ANORMALES", "${state.clinicalMetrics.abnormalBeats}")
-                        TechnicalValue("EVENTOS_ARRITMIA", "${state.clinicalMetrics.arrhythmiaCount}")
+                        state.abnormalities.take(3).forEach { abnormality ->
+                            TechnicalValue(
+                                abnormality.name,
+                                "DETECTADO"
+                            )
+                        }
                     }
                     
                     Spacer(modifier = Modifier.height(12.dp))
@@ -466,33 +458,29 @@ fun translateValidity(state: PpgValidityState): String {
     }
 }
 
-// fun translateSignalQuality(quality: SignalQuality): String {
-//     return when(quality) {
-//         SignalQuality.NO_SIGNAL -> "SIN SEÑAL"
-//         SignalQuality.POOR -> "DÉBIL"
-//         SignalQuality.ACCEPTABLE -> "ACEPTABLE"
-//         SignalQuality.GOOD -> "BUENA"
-//         SignalQuality.EXCELLENT -> "EXCELENTE"
-//     }
-// }
-
-fun translateClinicalValidity(validity: ClinicalSignalProcessor.ClinicalValidity): String {
-    return when(validity) {
-        ClinicalSignalProcessor.ClinicalValidity.EXCELLENT -> "EXCELENTE"
-        ClinicalSignalProcessor.ClinicalValidity.GOOD -> "BUENA"
-        ClinicalSignalProcessor.ClinicalValidity.ACCEPTABLE -> "ACEPTABLE"
-        ClinicalSignalProcessor.ClinicalValidity.POOR -> "DÉBIL"
-        ClinicalSignalProcessor.ClinicalValidity.INVALID -> "INVÁLIDA"
+fun translateSignalQuality(quality: SignalQuality): String {
+    return when(quality) {
+        SignalQuality.NO_SIGNAL -> "SIN SEÑAL"
+        SignalQuality.POOR -> "DÉBIL"
+        SignalQuality.ACCEPTABLE -> "ACEPTABLE"
+        SignalQuality.GOOD -> "BUENA"
+        SignalQuality.EXCELLENT -> "EXCELENTE"
     }
 }
 
-// fun translateWaveType(type: WaveType): String {
-//     return when(type) {
-//         WaveType.NO_SIGNAL -> "SIN SEÑAL"
-//         WaveType.WEAK -> "DÉBIL"
-//         WaveType.ACCEPTABLE -> "ACEPTABLE"
-//         WaveType.NORMAL -> "NORMAL"
-//         WaveType.IRREGULAR -> "IRREGULAR"
-//         WaveType.ABNORMAL -> "ANORMAL"
-//     }
-// }
+fun translateWaveType(type: WaveType): String {
+    return when(type) {
+        WaveType.NO_SIGNAL -> "SIN SEÑAL"
+        WaveType.WEAK -> "DÉBIL"
+        WaveType.ACCEPTABLE -> "ACEPTABLE"
+        WaveType.NORMAL -> "NORMAL"
+        WaveType.NORMAL_TRIFFASIC -> "NORMAL TRI-FÁSICA"
+        WaveType.NORMAL_BIFFASIC -> "NORMAL BI-FÁSICA"
+        WaveType.IRREGULAR -> "IRREGULAR"
+        WaveType.ABNORMAL -> "ANORMAL"
+        WaveType.ABNORMAL_MORPHOLOGY -> "MORFOLOGÍA ANORMAL"
+        WaveType.ARTIFACT_RAPID_PEAKS -> "ARTEFACTO: PICOS RÁPIDOS"
+        WaveType.DAMPED_WAVEFORM -> "ONDAS AMORTIGUADAS"
+        WaveType.FLAT_WAVEFORM -> "ONDAS PLANAS"
+    }
+}
