@@ -15,6 +15,7 @@ import com.forensicppg.monitor.domain.PpgValidityState
 import com.forensicppg.monitor.domain.PpgSample
 import com.forensicppg.monitor.domain.VitalReading
 import com.forensicppg.monitor.forensic.AuditTrail
+import com.forensicppg.monitor.forensic.CrashLogger
 import com.forensicppg.monitor.forensic.MeasurementEvent
 import com.forensicppg.monitor.forensic.MeasurementSession
 import com.forensicppg.monitor.forensic.SessionExporter
@@ -28,9 +29,13 @@ import com.forensicppg.monitor.ppg.RoiGeometryStore
 import com.forensicppg.monitor.ppg.SensorZloStore
 import com.forensicppg.monitor.sensors.MotionArtifactEstimator
 import com.forensicppg.monitor.sensors.MotionSensorController
+import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.plus
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -43,6 +48,27 @@ import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
 class MonitorViewModel(application: Application) : AndroidViewModel(application) {
+
+    /**
+     * Handler que registra cualquier excepción no atrapada de las
+     * corrutinas y la convierte en un reporte no fatal. Sin esto, una
+     * IllegalStateException de Camera2 (cámara ocupada por otra app, torch
+     * no disponible, OEM con MANUAL_SENSOR roto) viaja por el job y
+     * arrastra a viewModelScope, desencadenando `Thread.UncaughtException`
+     * y matando la app sin avisar al usuario. Antes ese era el camino al
+     * cierre inmediato apenas se tocaba INICIAR.
+     */
+    private val coroutineErrorHandler = CoroutineExceptionHandler { _, error ->
+        _running.value = false
+        runCatching {
+            auditTrail?.log(System.nanoTime(), MeasurementEvent.Kind.ERROR, error.toString())
+        }
+        CrashLogger.reportNonFatal("MonitorViewModel.scope", error)
+    }
+    /** Scope con SupervisorJob: una corrutina hija no cancela a sus hermanas. */
+    private val safeScope: CoroutineScope by lazy {
+        viewModelScope + SupervisorJob() + coroutineErrorHandler
+    }
 
     private val camera = Camera2PpgController(application)
     private val motionController = MotionSensorController(application)
@@ -185,13 +211,19 @@ class MonitorViewModel(application: Application) : AndroidViewModel(application)
 
     fun start() {
         if (_running.value) return
-        if (!camera.hasCameraPermission()) return
+        if (!camera.hasCameraPermission()) {
+            CrashLogger.reportNonFatal(
+                "MonitorViewModel.start",
+                IllegalStateException("Permiso de cámara no concedido")
+            )
+            return
+        }
 
-        beatFeedback.releaseQuietly()
+        runCatching { beatFeedback.releaseQuietly() }
         beatFeedback = BeatFeedbackController(getApplication())
 
         _running.value = true
-        viewModelScope.launch {
+        safeScope.launch {
             try {
                 val cfg = camera.start(targetFps = 30)
                 _cameraConfig.value = cfg
@@ -235,52 +267,65 @@ class MonitorViewModel(application: Application) : AndroidViewModel(application)
                 _calibrationProfile.value = calibrationManager.findProfile(cfg.cameraId, null)
 
                 motionJob = motionController.stream()
-                    .onEach { sample -> _motionScore.value = motionEstimator.push(sample) }
-                    .launchIn(viewModelScope)
+                    .onEach { sample ->
+                        runCatching { _motionScore.value = motionEstimator.push(sample) }
+                    }
+                    .launchIn(safeScope)
 
                 processingJob = camera.frameFlow
                     .onEach { raw ->
-                        harvestSensorZloIfNeeded(raw)
+                        try {
+                            harvestSensorZloIfNeeded(raw)
 
-                        val motion = _motionScore.value
-                        val acq = PpgPipeline.AcquisitionMetrics(
-                            frameDrops = camera.frameDropCount(),
-                            measuredFpsHz = camera.measuredFpsEmaHz(),
-                            jitterMs = camera.frameJitterEmaMs(),
-                            torchEnabled = cfg.torchEnabled,
-                            manualSensorApplied = cfg.manualControlApplied,
-                            targetFpsHint = tf
-                        )
-                        val step = withContext(Dispatchers.Default) {
-                            pipe.process(raw, motion, _calibrationProfile.value, acq)
-                        }
+                            val motion = _motionScore.value
+                            val acq = PpgPipeline.AcquisitionMetrics(
+                                frameDrops = camera.frameDropCount(),
+                                measuredFpsHz = camera.measuredFpsEmaHz(),
+                                jitterMs = camera.frameJitterEmaMs(),
+                                torchEnabled = cfg.torchEnabled,
+                                manualSensorApplied = cfg.manualControlApplied,
+                                targetFpsHint = tf
+                            )
+                            val step = withContext(Dispatchers.Default) {
+                                pipe.process(raw, motion, _calibrationProfile.value, acq)
+                            }
 
-                        session?.let { ses ->
-                            ses.framesTotal++
-                            ses.framesAccepted++
-                            ses.samples += step.sample
+                            session?.let { ses ->
+                                ses.framesTotal++
+                                ses.framesAccepted++
+                                ses.samples += step.sample
 
-                            step.confirmedBeat?.let { b ->
-                                ses.beats += b
-                                _beats.tryEmit(b)
-                                viewModelScope.launch(Dispatchers.Main) {
-                                    beatFeedback.onConfirmedBeat(
-                                        b,
-                                        _feedbackAudioOn.value,
-                                        _feedbackVibrationOn.value
-                                    )
+                                step.confirmedBeat?.let { b ->
+                                    ses.beats += b
+                                    _beats.tryEmit(b)
+                                    safeScope.launch(Dispatchers.Main) {
+                                        runCatching {
+                                            beatFeedback.onConfirmedBeat(
+                                                b,
+                                                _feedbackAudioOn.value,
+                                                _feedbackVibrationOn.value
+                                            )
+                                        }
+                                    }
                                 }
                             }
-                        }
 
-                        _samples.tryEmit(step.sample)
-                        _reading.value = step.reading
-                        _fps.value = camera.measuredFpsEmaHz()
+                            _samples.tryEmit(step.sample)
+                            _reading.value = step.reading
+                            _fps.value = camera.measuredFpsEmaHz()
+                        } catch (e: Throwable) {
+                            // Una excepción por frame no debe matar el flujo.
+                            CrashLogger.reportNonFatal("PpgFramePipeline", e)
+                        }
                     }
-                    .launchIn(viewModelScope)
-            } catch (e: Exception) {
+                    .launchIn(safeScope)
+            } catch (e: Throwable) {
                 _running.value = false
-                auditTrail?.log(System.nanoTime(), MeasurementEvent.Kind.ERROR, e.toString())
+                runCatching {
+                    auditTrail?.log(System.nanoTime(), MeasurementEvent.Kind.ERROR, e.toString())
+                }
+                CrashLogger.reportNonFatal("MonitorViewModel.start", e)
+                runCatching { camera.stop() }
             }
         }
     }
@@ -351,44 +396,47 @@ class MonitorViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun stop() {
-        processingJob?.cancel()
+        runCatching { processingJob?.cancel() }
         processingJob = null
-        motionJob?.cancel()
+        runCatching { motionJob?.cancel() }
         motionJob = null
         zloHarvestActive.set(false)
 
-        val jitterSnap = camera.frameJitterEmaMs()
-        val fpsSnap = camera.measuredFpsEmaHz()
+        val jitterSnap = runCatching { camera.frameJitterEmaMs() }.getOrDefault(0.0)
+        val fpsSnap = runCatching { camera.measuredFpsEmaHz() }.getOrDefault(0.0)
 
-        camera.stop()
+        runCatching { camera.stop() }
         pipeline = null
 
         _running.value = false
-        session?.let { s ->
-            s.endEpochMs = System.currentTimeMillis()
-            val readings = s.samples.map { it.sqi }
-            s.finalSqiMean = if (readings.isNotEmpty()) readings.average() else null
-            if (fpsSnap > 8.49) {
-                s.fpsActualMean = fpsSnap
-            } else if (_fps.value > 8.49) {
-                s.fpsActualMean = _fps.value
+        runCatching {
+            session?.let { s ->
+                s.endEpochMs = System.currentTimeMillis()
+                val readings = s.samples.map { it.sqi }
+                s.finalSqiMean = if (readings.isNotEmpty()) readings.average() else null
+                if (fpsSnap > 8.49) {
+                    s.fpsActualMean = fpsSnap
+                } else if (_fps.value > 8.49) {
+                    s.fpsActualMean = _fps.value
+                }
+                s.fpsJitterMs = jitterSnap
+                auditTrail?.log(System.nanoTime(), MeasurementEvent.Kind.SESSION_END,
+                    "samples=${s.samples.size} beats=${s.beats.size}")
             }
-            s.fpsJitterMs = jitterSnap
-            auditTrail?.log(System.nanoTime(), MeasurementEvent.Kind.SESSION_END,
-                "samples=${s.samples.size} beats=${s.beats.size}")
         }
     }
 
     fun exportCurrentSession() {
         val ses = session ?: return
-        viewModelScope.launch(Dispatchers.IO) {
+        safeScope.launch(Dispatchers.IO) {
             try {
                 val out = SessionExporter(getApplication()).export(ses)
                 auditTrail?.log(System.nanoTime(), MeasurementEvent.Kind.EXPORT,
                     "dir=${out.rootDir.absolutePath} hash=${out.integrityHashHex}")
                 _exportMessage.value = "Exportado a ${out.rootDir.absolutePath}\nSHA-256=${out.integrityHashHex}"
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 _exportMessage.value = "Error exportando: ${e.message}"
+                CrashLogger.reportNonFatal("MonitorViewModel.export", e)
             }
         }
     }

@@ -2,7 +2,22 @@
 
 > **Subidos manualmente** sólo para descarga rápida desde la PR. El `.gitignore` global del repo ignora `*.apk`; aquí se hace excepción.
 
-## ForensicPPG-debug-v3-no-crash-37b3.apk (RECOMENDADO)
+## ForensicPPG-debug-v4-safe-mode-37b3.apk (RECOMENDADO)
+
+- Tamaño: 9.8 MB
+- SHA-256: `c6de8e838b5f140b7d9be314458e7648c31be08feafe787654e2349400ebf28a`
+- versionName: `1.0.0-forensic`
+
+Soluciona el cierre al tocar botones:
+
+- `MonitorViewModel` ahora usa un `safeScope = viewModelScope + SupervisorJob() + CoroutineExceptionHandler`. Cualquier excepción del `frameFlow` de Camera2 (que antes viajaba al thread principal y mataba la app) ahora se atrapa, se loguea como **no-fatal** y se muestra al usuario en pantalla.
+- Cada `onEach` y `tryEmit` envuelto en `try/catch`; el flujo continúa.
+- Nueva `SafeModeScreen` que aparece automáticamente cuando hay un crash o no-fatal: muestra el stack trace y tiene **botón "Compartir reporte"** (Intent `ACTION_SEND` + `FileProvider`) para mandarlo por WhatsApp/email/etc.
+- `SafeContent` Compose envuelve toda la UI: si una pantalla falla en la composición, no se cierra la app sino que se muestra el stack trace.
+- `viewModel.start()` y `stop()` 100 % en `runCatching`.
+- `BeatFeedbackController` ya era a prueba de fallos desde v3.
+
+## ForensicPPG-debug-v3-no-crash-37b3.apk
 
 - Tamaño: 9.4 MB
 - SHA-256: `4bc61f376d96669869b73ca5c7e188ecdd3affbc844f96f8b6762f56027bfefd`

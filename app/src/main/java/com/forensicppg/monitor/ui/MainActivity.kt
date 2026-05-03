@@ -1,6 +1,7 @@
 package com.forensicppg.monitor.ui
 
 import android.Manifest
+import android.app.Application
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.view.WindowManager
@@ -23,6 +24,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -48,55 +50,76 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Evitar que un theme inmersivo agresivo o un controller no-disponible
-        // cause un crash en oem específicos: arrancamos con setup mínimo.
-        try {
-            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        } catch (e: Throwable) {
-            // No bloqueamos por algo cosmético.
-        }
+        runCatching { window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
 
         setContent {
-            var showCalibration by remember { mutableStateOf(false) }
-            val previousCrash = remember {
-                CrashLogger.lastCrashFile(application)?.takeIf { it.exists() && it.length() > 0 }
-                    ?.let { runCatching { it.readText() }.getOrNull() }
+            // Listener live: si una corrutina del ViewModel reporta un error
+            // no fatal, refrescamos esta variable y mostramos SafeModeScreen.
+            var liveError by remember {
+                mutableStateOf(CrashLogger.lastNonFatalReport())
+            }
+            DisposableEffect(Unit) {
+                val cb: (String) -> Unit = { liveError = it }
+                CrashLogger.addLiveListener(cb)
+                onDispose { CrashLogger.removeLiveListener(cb) }
             }
 
+            // Reporte previo (crash o no-fatal de ejecución anterior).
+            val previous = remember { lastCrashReport(application) }
+
+            var showCalibration by remember { mutableStateOf(false) }
+            var safeModeDismissed by remember { mutableStateOf(false) }
+
+            val showSafeMode = (liveError != null) || (previous != null && !safeModeDismissed)
+
             Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
-                if (!hasCameraPermission()) {
-                    PermissionScreen(
-                        previousCrash = previousCrash,
-                        onGrant = { permissionLauncher.launch(Manifest.permission.CAMERA) }
-                    )
-                } else if (showCalibration) {
-                    CalibrationScreen(
-                        viewModel = viewModel,
-                        onClose = { showCalibration = false }
-                    )
-                } else {
-                    MonitorScreen(
-                        viewModel = viewModel,
-                        onOpenCalibration = { showCalibration = true }
-                    )
+                when {
+                    showSafeMode -> {
+                        val text = liveError ?: previous?.first ?: ""
+                        val file = previous?.second
+                        SafeModeScreen(
+                            title = if (liveError != null) "Error en ejecución" else "Cierre inesperado anterior",
+                            report = text,
+                            crashFile = file,
+                            onContinue = {
+                                liveError = null
+                                safeModeDismissed = true
+                            }
+                        )
+                    }
+                    !hasCameraPermission() -> {
+                        PermissionScreen(
+                            onGrant = {
+                                runCatching {
+                                    permissionLauncher.launch(Manifest.permission.CAMERA)
+                                }
+                            }
+                        )
+                    }
+                    showCalibration -> {
+                        SafeContent {
+                            CalibrationScreen(
+                                viewModel = viewModel,
+                                onClose = { showCalibration = false }
+                            )
+                        }
+                    }
+                    else -> {
+                        SafeContent {
+                            MonitorScreen(
+                                viewModel = viewModel,
+                                onOpenCalibration = { showCalibration = true }
+                            )
+                        }
+                    }
                 }
             }
         }
-
-        // YA NO arrancamos la cámara automáticamente. El usuario debe pulsar
-        // INICIAR. Antes el `viewModel.start()` aquí podía crashear si el
-        // permiso recién acababa de concederse y la cámara aún no estaba
-        // libre, o si Camera2 fallaba en la apertura.
     }
 
     override fun onPause() {
         super.onPause()
         runCatching { viewModel.stop() }
-    }
-
-    override fun onResume() {
-        super.onResume()
-        // Sin reanudación automática: respetamos la decisión del usuario.
     }
 
     override fun onStop() {
@@ -109,8 +132,41 @@ class MainActivity : ComponentActivity() {
                 PackageManager.PERMISSION_GRANTED
 }
 
+/** Wrap defensivo: si la composición lanza, muestra un fallback en lugar
+ *  de matar el proceso. (Compose habitualmente recompone tras error en
+ *  StrictMode/DEV, pero en producción una NPE recursiva tira la actividad.) */
 @Composable
-private fun PermissionScreen(previousCrash: String?, onGrant: () -> Unit) {
+private fun SafeContent(content: @Composable () -> Unit) {
+    val result = runCatching { content() }
+    val err = result.exceptionOrNull()
+    if (err != null) {
+        CrashLogger.reportNonFatal("Compose.SafeContent", err)
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color(0xFF1A0E0A))
+                .padding(16.dp)
+                .verticalScroll(rememberScrollState())
+        ) {
+            Text(
+                "Error en la pantalla.",
+                color = Color(0xFFFFAA22),
+                fontFamily = FontFamily.Monospace,
+                fontSize = 14.sp
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                err.stackTraceToString().take(8000),
+                color = Color(0xFFFFCCAA),
+                fontFamily = FontFamily.Monospace,
+                fontSize = 9.sp
+            )
+        }
+    }
+}
+
+@Composable
+private fun PermissionScreen(onGrant: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -143,29 +199,12 @@ private fun PermissionScreen(previousCrash: String?, onGrant: () -> Unit) {
         ) {
             Text("Conceder permiso", color = Color.Black, fontFamily = FontFamily.Monospace)
         }
-
-        if (!previousCrash.isNullOrBlank()) {
-            Spacer(Modifier.height(28.dp))
-            Text(
-                "Se detectó un cierre inesperado anterior. Reporte de diagnóstico:",
-                color = Color(0xFFFFAA22),
-                fontFamily = FontFamily.Monospace,
-                fontSize = 12.sp
-            )
-            Spacer(Modifier.height(6.dp))
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(Color(0xFF1A0F0A))
-                    .padding(8.dp)
-            ) {
-                Text(
-                    previousCrash.take(4000),
-                    color = Color(0xFFFFCCAA),
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 9.sp
-                )
-            }
-        }
     }
+}
+
+@Suppress("unused")
+private fun unusedToKeepImports(app: Application) {
+    // Mantener referencia a la clase Application para evitar warnings de
+    // importaciones cuando se reorganice el archivo.
+    @Suppress("UnusedExpression") app.toString()
 }
