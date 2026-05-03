@@ -21,6 +21,14 @@ torch, AE/AWB lock. Paquetes: `camera/`, `sensors/`, `ppg/`, `pipeline/`, `foren
 
 Requiere Android SDK (`platforms;android-35`, `build-tools;35.0.0`) y JDK 17+.
 
+### Si Gradle dice «SDK location not found»
+
+1. Instalá **Android Studio** y en **Settings → Android SDK** copiá la ruta *Android SDK Location*.
+2. En la raíz del repo, creá **`local.properties`** (no se sube a git; figura en `.gitignore`).
+3. Partí de la plantilla: `cp local.properties.example local.properties` y reemplazá `sdk.dir` por tu ruta.
+4. En **Windows**, escapá las barras en `sdk.dir`, p. ej. `C\:\\Users\\...\\Android\\Sdk`.
+5. O definí la variable de entorno **`ANDROID_HOME`** al directorio del SDK.
+
 ---
 
 ## Estructura
@@ -29,6 +37,7 @@ Requiere Android SDK (`platforms;android-35`, `build-tools;35.0.0`) y JDK 17+.
 .
 ├── app/                         App Android (Kotlin + Compose + Camera2)
 │   └── src/main/java/com/forensicppg/monitor/{camera,sensors,ppg,pipeline,forensic,domain,ui}
+├── local.properties.example     Plantilla → copiar a local.properties con tu sdk.dir
 ├── vercel.json                  Despliegue web deshabilitado (ver mensaje en build)
 └── README.md
 ```

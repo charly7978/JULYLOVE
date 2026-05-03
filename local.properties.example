@@ -1,0 +1,11 @@
+# Copiá este archivo a "local.properties" (no se sube a git) y ajustá la ruta.
+# En Android Studio: File → Settings → Languages & Frameworks → Android SDK
+# → "Android SDK Location" (copiá esa ruta).
+
+# Linux / macOS (ejemplo):
+# sdk.dir=/home/tu_usuario/Android/Sdk
+
+# Windows (escapá las barras invertidas para Gradle):
+# sdk.dir=C\:\\Users\\tu_usuario\\AppData\\Local\\Android\\Sdk
+
+sdk.dir=REEMPLAZAR_POR_TU_RUTA_SDK
