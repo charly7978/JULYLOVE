@@ -13,6 +13,33 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 private const val FFT_SIZE = 512
+/** Mínimo de muestras para estimar espectro pulsátil (bootstrap ~2 s @ 30 Hz antes del FFT completo). */
+private const val SPECTRAL_BOOTSTRAP_MIN_SAMPLES = 64
+
+/**
+ * Tamaños DFT descendente: usamos la ventana mayor que entre en buffer hasta [FFT_SIZE].
+ * Así no queda [SpectrumSummary] con Fc=0 (bloqueaba [PpgPhysiologyClassifier] ~17 s al inicio).
+ */
+private val SPECTRAL_FFT_STEPS_DESC: IntArray =
+    intArrayOf(
+        512, 448, 384, 352, 320, 288, 256, 224, 192, 176, 160, 144, 128,
+        112, 104, 96, 88, 80, 72, 64
+    )
+
+private fun fftWindowSamples(haveSamples: Int): Int {
+    val h = haveSamples.coerceAtLeast(0)
+    var best = 0
+    var i = 0
+    while (i < SPECTRAL_FFT_STEPS_DESC.size) {
+        val sz = SPECTRAL_FFT_STEPS_DESC[i]
+        if (h >= sz) {
+            best = sz
+            break
+        }
+        i++
+    }
+    return best
+}
 
 /**
  * Buffer circular grande, detrend, pasabanda Butterworth cardíaca y PSD (DFT estable en ventana fija).
@@ -82,11 +109,14 @@ class PpgSignalProcessor(
         val dcCv = coefficientOfVariation(segDc)
         val dcStab = (1.0 - min(12.0, dcCv)).coerceIn(0.0, 1.0)
 
-        if (effectiveSamples() >= FFT_SIZE) {
-            lastSpectrum = computeSpectrum(dcStabilityHold = dcStab)
-        } else {
-            lastSpectrum = lastSpectrum.copy(dcStability = dcStab)
-        }
+        val have = effectiveSamples()
+        val win = fftWindowSamples(have)
+        lastSpectrum =
+            if (win >= SPECTRAL_BOOTSTRAP_MIN_SAMPLES) {
+                computeSpectrum(dcStabilityHold = dcStab, nFft = win)
+            } else {
+                lastSpectrum.copy(dcStability = dcStab)
+            }
 
         return ProcessorOutput(
             filteredWave = filt,
@@ -109,35 +139,38 @@ class PpgSignalProcessor(
         return out
     }
 
-    private fun computeSpectrum(dcStabilityHold: Double): SpectrumSummary {
-        val gRaw = chronological(rawGreen, FFT_SIZE)
-        val rRaw = chronological(rawRed, FFT_SIZE)
+    private fun computeSpectrum(dcStabilityHold: Double, nFft: Int): SpectrumSummary {
+        require(nFft >= SPECTRAL_BOOTSTRAP_MIN_SAMPLES && nFft <= FFT_SIZE)
+        val gRaw = chronological(rawGreen, nFft)
+        val rRaw = chronological(rawRed, nFft)
 
         val ff = gRaw.clone()
         subtractMean(ff)
         applyHann(ff)
         val magn = naivePower(ff)
 
-        val binHz = sr / FFT_SIZE
-        val iLo = max(2, ceil(0.50 / binHz).toInt())
-        val iHi = min(magn.lastIndex - 2, floor(4.0 / binHz).toInt())
+        val binHz = sr / nFft.toDouble()
+        val iLo = max(2, ceil(0.48 / binHz).toInt())
+        val iHi = min(magn.lastIndex - 2, floor(4.38 / binHz).toInt())
+        val hiSafe = max(iLo, iHi.coerceAtMost(magn.lastIndex - 2))
         val totalPow = max(1e-15, magn.sum())
-        val heartPow = sumSlice(magn, iLo, iHi.coerceAtLeast(iLo))
+        val heartPow = sumSlice(magn, iLo, hiSafe)
         val frac = heartPow / totalPow
 
         var peakPow = -1.0
-        var peakHz = 0.7
-        for (i in iLo..iHi) {
+        var peakHz = (iLo * binHz).coerceIn(0.52, 2.05)
+        for (i in iLo..hiSafe) {
             if (magn[i] > peakPow) {
                 peakPow = magn[i]; peakHz = i * binHz
             }
         }
-        val noiseMed = maskedMedianOutside(magn, iLo, iHi)
+        if (peakPow < 1e-30) peakPow = 1e-30
+        val noiseMed = maskedMedianOutside(magn, iLo, hiSafe)
         val snrDb = 10.0 * log10((peakPow / noiseMed.coerceAtLeast(1e-22)).coerceAtLeast(1e-14))
 
         val coh = pearson(rRaw, gRaw)
         val gAc = gRaw.clone(); subtractMean(gAc)
-        val ac = autocorrStrength(gAc, sr)
+        val ac = autocorrStrength(gAc, sr, nFft)
 
         return SpectrumSummary(
             dominantFreqHz = peakHz.coerceIn(0.45, 4.5),
@@ -209,11 +242,13 @@ private fun sumSlice(a: DoubleArray, lo: Int, hi: Int): Double {
 }
 
 private fun maskedMedianOutside(a: DoubleArray, lo: Int, hi: Int): Double {
+    val loS = lo.coerceIn(0, a.lastIndex)
+    val hiE = hi.coerceIn(0, a.lastIndex)
     val tmp = mutableListOf<Double>()
     for (idx in a.indices) {
-        if (idx <= 8) continue
-        if (idx in lo .. hi + 16) continue
-        tmp += a[idx]
+        if (idx <= 3) continue
+        val nearHeart = idx in max(0, loS - 6)..min(a.lastIndex, hiE + 14)
+        if (!nearHeart) tmp += a[idx]
     }
     if (tmp.size < 6) return 1e-12
     tmp.sort()
@@ -222,7 +257,7 @@ private fun maskedMedianOutside(a: DoubleArray, lo: Int, hi: Int): Double {
 
 private fun pearson(x: DoubleArray, y: DoubleArray): Double {
     val n = min(x.size, y.size)
-    if (n < 64) return 0.0
+    if (n < SPECTRAL_BOOTSTRAP_MIN_SAMPLES) return 0.0
     var mx = 0.0
     var my = 0.0
     var i = 0
@@ -243,11 +278,13 @@ private fun pearson(x: DoubleArray, y: DoubleArray): Double {
     return abs(nr / sqrt(dx * dy + 1e-18))
 }
 
-private fun autocorrStrength(x: DoubleArray, srHz: Double): Double {
-    val n = x.size
-    if (n < 140) return 0.0
-    val lagMin = max(14, ceil(srHz / 4.15).toInt())
-    val lagMax = min(n / 4, ceil(srHz / 0.50).toInt())
+private fun autocorrStrength(x: DoubleArray, srHz: Double, nFftHint: Int): Double {
+    val n = min(x.size, nFftHint)
+    if (n < SPECTRAL_BOOTSTRAP_MIN_SAMPLES) return 0.0
+    /** Lags 0.52–4.4 Hz ⇒ ~lag 7–62 @ ~30 Hz. */
+    val lagMin = max(4, ceil(srHz / 4.42).toInt().coerceAtMost(max(8, n / 8)))
+    var lagMax = min(n / 3, ceil(srHz / 0.52).toInt()).coerceAtLeast(lagMin)
+    lagMax = min(lagMax, max(lagMin, n / 3))
     var best = 0.0
     for (lag in lagMin..lagMax) {
         var acc = 0.0
@@ -257,6 +294,7 @@ private fun autocorrStrength(x: DoubleArray, srHz: Double): Double {
             acc += v * x[t - lag]
             norm += v * v
         }
+        if (norm < 1e-18) continue
         val sc = abs(acc / sqrt(norm.coerceAtLeast(1e-12)))
         if (sc > best) best = sc
     }
