@@ -7,8 +7,7 @@ export class BeatClassifier {
     private readonly rrHistoryLimit = 16,
     private readonly prematureFactor = 0.8,
     private readonly pauseFactor = 1.3,
-    private readonly irregularityFactor = 0.2,
-    private readonly minSqiForBeat = 0.03
+    private readonly irregularityFactor = 0.2
   ) {}
 
   reset(): void {
@@ -16,7 +15,7 @@ export class BeatClassifier {
   }
 
   classify(candidate: BeatEvent, sqi: number): BeatEvent {
-    if (sqi < this.minSqiForBeat) {
+    if (sqi < 0.35) {
       return { ...candidate, type: 'INVALID_SIGNAL', reason: 'señal_insuficiente', quality: sqi }
     }
     const rr = candidate.rrMs

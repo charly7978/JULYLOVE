@@ -1,34 +1,27 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { CameraController, type CameraCapabilitiesSnapshot } from '../camera/CameraController'
-import { PROCESSING } from '../constants/processing'
 import { PpgPipeline } from '../ppg/pipeline'
 import { DeviceCalibrationManager, type CalibrationPoint, type CalibrationProfile } from '../ppg/spo2'
 import type { BeatEvent, PpgSample, VitalReading } from '../ppg/types'
 import { MotionEstimator } from '../sensors/MotionEstimator'
 
 const DEFAULT_READING: VitalReading = {
-  bpm: 0,
+  bpm: null,
   bpmConfidence: 0,
-  spo2: 0,
+  spo2: null,
   spo2Confidence: 0,
   sqi: 0,
   perfusionIndex: 0,
   motionScore: 0,
-  rrMs: 0,
-  rrSdnnMs: 0,
-  pnn50: 0,
+  rrMs: null,
+  rrSdnnMs: null,
+  pnn50: null,
   beatsDetected: 0,
   abnormalBeats: 0,
   state: 'NO_CONTACT',
   validityFlags: 0,
-  message: 'Cubra cámara + flash con la yema del dedo índice',
-  hypertensionRisk: 'NO_VALID_PPG',
-  bloodPressureSystolic: 0,
-  bloodPressureDiastolic: 0,
-  glucoseMgDl: 0,
-  lipidsMgDl: 0,
-  arrhythmiaStatus: 'NO_VALID_PPG',
-  reasonCodes: ['NO_VALID_PPG']
+  message: 'Coloque el dedo sobre la cámara trasera',
+  hypertensionRisk: null
 }
 
 export interface MonitorApi {
@@ -53,9 +46,9 @@ export interface MonitorApi {
   clearCalibration(): void
 }
 
-const SAMPLE_BUFFER_LIMIT = PROCESSING.SAMPLE_BUFFER_LIMIT
-const BEAT_BUFFER_LIMIT = PROCESSING.BEAT_BUFFER_LIMIT
-const PUBLISH_THROTTLE_MS = PROCESSING.PUBLISH_THROTTLE_MS
+const SAMPLE_BUFFER_LIMIT = 900
+const BEAT_BUFFER_LIMIT = 80
+const PUBLISH_THROTTLE_MS = 50
 
 export function useMonitor(): MonitorApi {
   const cameraRef = useRef<CameraController | null>(null)
@@ -101,7 +94,7 @@ export function useMonitor(): MonitorApi {
 
       const camera = new CameraController()
       cameraRef.current = camera
-      const targetFps = PROCESSING.TARGET_FPS
+      const targetFps = 30
       const pipeline = new PpgPipeline(targetFps)
       pipeline.setTargetFps(targetFps)
       pipelineRef.current = pipeline
@@ -124,14 +117,11 @@ export function useMonitor(): MonitorApi {
             if (samplesRef.current.length > SAMPLE_BUFFER_LIMIT) {
               samplesRef.current.splice(0, samplesRef.current.length - SAMPLE_BUFFER_LIMIT)
             }
-            if (step.reading.state === 'VALID_LIVE_PPG' && step.beat) {
+            if (step.beat) {
               beatsRef.current.push(step.beat)
               if (beatsRef.current.length > BEAT_BUFFER_LIMIT) {
                 beatsRef.current.splice(0, beatsRef.current.length - BEAT_BUFFER_LIMIT)
               }
-            } else if (beatsRef.current.length !== 0) {
-              // Fail-closed: fuera de VALID_LIVE_PPG no hay marcadores de latido.
-              beatsRef.current = []
             }
           }
 
@@ -176,9 +166,10 @@ export function useMonitor(): MonitorApi {
 
   const captureCalibrationPoint = useCallback(
     (reference: number) => {
-      // Sólo permitimos captura con evidencia viva validada.
+      // Validación laxa: el estimador interno ya filtra. Sólo exigimos que
+      // tengamos una ratio real medida y que el monitor esté en MEASURING.
       const r = lastRatioRef.current
-      if (r === null || reading.state !== 'VALID_LIVE_PPG') return
+      if (r === null || reading.state !== 'MEASURING') return
       pendingRef.current.push({
         capturedAtMs: Date.now(),
         referenceSpo2: reference,

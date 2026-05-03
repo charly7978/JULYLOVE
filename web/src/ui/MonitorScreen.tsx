@@ -1,9 +1,8 @@
 import { useEffect, useState } from 'react'
 import type { MonitorApi } from '../hooks/useMonitor'
-import { MEASUREMENT_STATE_LABEL, stateAllowsMetrics } from '../ppg/types'
+import { MEASUREMENT_STATE_LABEL, stateAllowsMetrics, HYPERTENSION_LABEL } from '../ppg/types'
 import { SignalQualityIndex, SQI_BAND_LABEL } from '../ppg/sqi'
 import { CalibrationOverlay } from './CalibrationOverlay'
-import { FingerPlacementGuide } from './FingerPlacementGuide'
 import { PpgWaveform } from './PpgWaveform'
 
 /**
@@ -15,15 +14,17 @@ import { PpgWaveform } from './PpgWaveform'
  */
 export function MonitorScreen({ monitor }: { monitor: MonitorApi }) {
   const [showCalibration, setShowCalibration] = useState(false)
-  const [showGuide, setShowGuide] = useState(true)
   const r = monitor.reading
   const measuring = stateAllowsMetrics(r.state)
-  const bpm = r.bpm.toFixed(0)
-  const spo2 = r.spo2.toFixed(1)
-  const rr = r.rrMs.toFixed(0)
+  const bpm = r.bpm !== null && measuring ? r.bpm.toFixed(0) : '--'
+  const spo2 = r.spo2 !== null && measuring ? r.spo2.toFixed(1) : '--'
+  const rr = r.rrMs !== null && measuring ? r.rrMs.toFixed(0) : '--'
   // `monitor.tick` fuerza la reevaluación cuando cambian los refs.
   void monitor.tick
-  const showWave = monitor.running && r.state !== 'NO_CONTACT' && monitor.samplesRef.current.length > 1
+  const showWave =
+    monitor.running &&
+    (r.state === 'WARMUP' || measuring) &&
+    monitor.samplesRef.current.length > 1
   const stateColor = colorOfState(r.state)
   const sqiBand = new SignalQualityIndex().band(r.sqi)
   const sqiColor =
@@ -34,17 +35,15 @@ export function MonitorScreen({ monitor }: { monitor: MonitorApi }) {
       : sqiBand === 'DEGRADED'
       ? '#FFAA22'
       : '#FF3344'
-  const spo2Label = measuring ? (monitor.calibration ? 'clínico' : 'provisional') : 'NO_VALID_PPG'
-  const riskLabel =
-    r.hypertensionRisk === 'NO_VALID_PPG'
-      ? 'NO_VALID_PPG'
-      : r.hypertensionRisk === 'HYPERTENSIVE_PATTERN'
-        ? 'PATRÓN HIPERTENSIVO'
-        : r.hypertensionRisk === 'BORDERLINE'
-          ? 'LIMÍTROFE'
-          : r.hypertensionRisk === 'NORMOTENSE'
-            ? 'NORMOTENSO'
-            : 'INDETERMINADO'
+  const spo2Label =
+    r.spo2 !== null
+      ? monitor.calibration
+        ? 'clínico'
+        : 'provisional'
+      : r.state === 'MEASURING'
+      ? 'req. datos'
+      : '—'
+  const risk = r.hypertensionRisk
 
   useEffect(() => {
     if (!monitor.running) return
@@ -92,12 +91,12 @@ export function MonitorScreen({ monitor }: { monitor: MonitorApi }) {
           <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
             <div
               style={{
-                color: measuring ? '#22FFAA' : '#556677',
+                color: r.bpm !== null ? '#22FFAA' : '#556677',
                 fontSize: 'clamp(56px, 14vw, 140px)',
                 fontWeight: 900,
                 lineHeight: 0.95,
                 letterSpacing: 1,
-                textShadow: measuring ? '0 0 14px rgba(34,255,170,0.55)' : 'none'
+                textShadow: r.bpm !== null ? '0 0 14px rgba(34,255,170,0.55)' : 'none'
               }}
             >
               {bpm}
@@ -106,7 +105,7 @@ export function MonitorScreen({ monitor }: { monitor: MonitorApi }) {
               lpm
             </div>
           </div>
-          {measuring ? (
+          {r.bpm !== null ? (
             <div style={{ color: '#66ccaa', fontSize: 11 }}>
               confianza {(r.bpmConfidence * 100).toFixed(0)}% · {r.beatsDetected} latidos
             </div>
@@ -119,7 +118,7 @@ export function MonitorScreen({ monitor }: { monitor: MonitorApi }) {
           <div style={{ display: 'flex', alignItems: 'baseline', gap: 4 }}>
             <div
               style={{
-                color: measuring ? (monitor.calibration ? '#22FFAA' : '#FFDD55') : '#556677',
+                color: r.spo2 !== null ? (monitor.calibration ? '#22FFAA' : '#FFDD55') : '#556677',
                 fontSize: 'clamp(30px, 8vw, 64px)',
                 fontWeight: 900,
                 lineHeight: 0.95
@@ -138,7 +137,7 @@ export function MonitorScreen({ monitor }: { monitor: MonitorApi }) {
           <Stat label="PI" value={measuring ? r.perfusionIndex.toFixed(2) : '--'} unit="%" color="#AACCEE" />
           <Stat
             label="SDNN"
-            value={measuring ? r.rrSdnnMs.toFixed(0) : '0'}
+            value={r.rrSdnnMs !== null ? r.rrSdnnMs.toFixed(0) : '--'}
             unit="ms"
             color="#88ccdd"
           />
@@ -150,13 +149,13 @@ export function MonitorScreen({ monitor }: { monitor: MonitorApi }) {
           <Stat label="MOV." value={r.motionScore.toFixed(2)} color="#AACCEE" />
           <Stat
             label="CRIBADO"
-            value={riskLabel}
+            value={risk ? HYPERTENSION_LABEL[risk].label : '—'}
             color={
-              r.hypertensionRisk === 'HYPERTENSIVE_PATTERN'
+              risk === 'HYPERTENSIVE_PATTERN'
                 ? '#FF3344'
-                : r.hypertensionRisk === 'BORDERLINE'
+                : risk === 'BORDERLINE'
                 ? '#FFAA22'
-                : r.hypertensionRisk === 'NORMOTENSE'
+                : risk === 'NORMOTENSE'
                 ? '#22FFAA'
                 : '#88ccdd'
             }
@@ -176,22 +175,14 @@ export function MonitorScreen({ monitor }: { monitor: MonitorApi }) {
         </div>
 
         {/* Mensaje clínico */}
-        <div style={clinicalMsg}>
-          {r.message}
-          <span style={{ marginLeft: 8, color: '#77aabb' }}>
-            [{r.reasonCodes.slice(0, 4).join(' · ') || 'SIN_CODIGOS'}]
-          </span>
-        </div>
+        <div style={clinicalMsg}>{r.message}</div>
       </div>
 
       {/* Controles al pie */}
       <div style={controlBar}>
         <button
           style={btnStyle(monitor.running ? '#FF3344' : '#22FFAA')}
-          onClick={() => {
-            if (monitor.running) void monitor.stop()
-            else setShowGuide(true)
-          }}
+          onClick={() => (monitor.running ? void monitor.stop() : void monitor.start())}
         >
           {monitor.running ? 'DETENER' : 'INICIAR'}
         </button>
@@ -209,15 +200,6 @@ export function MonitorScreen({ monitor }: { monitor: MonitorApi }) {
 
       {showCalibration ? (
         <CalibrationOverlay monitor={monitor} onClose={() => setShowCalibration(false)} />
-      ) : null}
-
-      {showGuide ? (
-        <FingerPlacementGuide
-          onContinue={() => {
-            setShowGuide(false)
-            if (!monitor.running) void monitor.start()
-          }}
-        />
       ) : null}
     </div>
   )
@@ -258,8 +240,11 @@ function Stat({
 
 function colorOfState(state: string): string {
   switch (state) {
-    case 'VALID_LIVE_PPG': return '#22FFAA'
-    case 'PROBABLE_PPG': return '#FFAA22'
+    case 'MEASURING': return '#22FFAA'
+    case 'WARMUP': return '#FFDD22'
+    case 'DEGRADED':
+    case 'CONTACT_PARTIAL':
+    case 'CALIBRATION_REQUIRED': return '#FFAA22'
     case 'NO_CONTACT': return '#8899AA'
     default: return '#FF3344'
   }

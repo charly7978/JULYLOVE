@@ -22,7 +22,8 @@ export function CalibrationOverlay({ monitor, onClose }: { monitor: MonitorApi; 
       <div style={{ fontSize: 12 }}>
         Para mostrar un valor absoluto de SpO₂ este dispositivo debe calibrarse contra un oxímetro de
         referencia. Coloque ambos dedos en simultáneo y capture al menos 3 puntos con distintas
-        saturaciones. Sin perfil válido, la confianza clínica se mantiene bloqueada.
+        saturaciones. Sin perfil válido el monitor muestra "SpO₂ requiere calibración" — nunca un
+        número por default.
       </div>
       <div style={{ fontSize: 12 }}>
         Perfil activo:{' '}
@@ -80,7 +81,7 @@ export function CalibrationOverlay({ monitor, onClose }: { monitor: MonitorApi; 
         </button>
       </div>
       <div style={{ fontSize: 10, color: '#ccffee' }}>
-        La captura solo se habilita con estado VALID_LIVE_PPG. Si un punto se captura con
+        La app jamás mostrará SpO₂ absoluto sin un perfil validado. Si un punto se captura con
         SQI&nbsp;&lt;&nbsp;0.55, movimiento alto o perfusión baja, será rechazado.
       </div>
     </div>

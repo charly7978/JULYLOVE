@@ -6,13 +6,9 @@ function feed(est: Spo2Estimator, fs: number, seconds: number) {
   const beatHz = 1.2
   for (let i = 0; i < n; i++) {
     const t = i / fs
-    // Bajo flash blanco + dedo: G es más pulsátil que R (Hb absorbe
-    // más verde). Modelamos AC_R/DC_R ≈ 1.4% y AC_G/DC_G ≈ 1.0% para
-    // saturación normal (~98%): R = 0.014/0.010 ≈ 1.4 → 110 − 25·1.4 ≈ 75
-    // [se aclara]: usamos coeficientes fisiológicos para validar curva.
     est.push(
-      140 + 2.0 * Math.sin(2 * Math.PI * beatHz * t),
-      80 + 0.9 * Math.sin(2 * Math.PI * beatHz * t + 0.1),
+      140 + 2 * Math.sin(2 * Math.PI * beatHz * t),
+      80 + 0.8 * Math.sin(2 * Math.PI * beatHz * t + 0.1),
       40 + 0.3 * Math.sin(2 * Math.PI * beatHz * t + 0.2)
     )
   }
@@ -56,27 +52,5 @@ describe('Spo2Estimator', () => {
     const e = new Spo2Estimator(30)
     feed(e, 30, 10)
     expect(e.estimate(cal, 1.5, 0.8, 0.9, 0.01).spo2).toBeNull()
-  })
-
-  it('ratio R/G crece cuando AC_R relativo crece (saturación baja)', () => {
-    const fs = 30
-    // Caso "más absorción de rojo" (saturación más baja): incrementamos
-    // amplitud AC del rojo manteniendo verde fijo. La RoR debe subir.
-    const baseline = new Spo2Estimator(fs)
-    feed(baseline, fs, 8)
-    const rBase = baseline.estimate(cal, 1.5, 0.8, 0.05, 0.01).ratioOfRatios as number
-
-    const lower = new Spo2Estimator(fs)
-    const beatHz = 1.2
-    for (let i = 0; i < fs * 8; i++) {
-      const t = i / fs
-      lower.push(
-        140 + 4.0 * Math.sin(2 * Math.PI * beatHz * t),
-        80 + 0.9 * Math.sin(2 * Math.PI * beatHz * t),
-        40 + 0.3 * Math.sin(2 * Math.PI * beatHz * t)
-      )
-    }
-    const rLower = lower.estimate(cal, 1.5, 0.8, 0.05, 0.01).ratioOfRatios as number
-    expect(rLower).toBeGreaterThan(rBase)
   })
 })

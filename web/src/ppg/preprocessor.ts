@@ -43,7 +43,7 @@ export class PpgPreprocessor {
   private initialized = false
   private readonly acBuffer: Float64Array
   private acIndex = 0
-  private acFilledCount = 0
+  private acFilled = 0
 
   constructor(sampleRate: number, lowHz = 0.5, highHz = 4.0) {
     this.sampleRate = sampleRate
@@ -65,12 +65,7 @@ export class PpgPreprocessor {
     this.initialized = false
     this.acBuffer.fill(0)
     this.acIndex = 0
-    this.acFilledCount = 0
-  }
-
-  /** Cantidad de muestras filtradas almacenadas en la ventana AC. */
-  acFilled(): number {
-    return this.acFilledCount
+    this.acFilled = 0
   }
 
   process(rawSample: number): PreprocessorOutput {
@@ -96,11 +91,11 @@ export class PpgPreprocessor {
 
     this.acBuffer[this.acIndex] = filtered
     this.acIndex = (this.acIndex + 1) % this.acBuffer.length
-    if (this.acFilledCount < this.acBuffer.length) this.acFilledCount++
+    if (this.acFilled < this.acBuffer.length) this.acFilled++
 
     let mx = Number.NEGATIVE_INFINITY
     let mn = Number.POSITIVE_INFINITY
-    for (let i = 0; i < this.acFilledCount; i++) {
+    for (let i = 0; i < this.acFilled; i++) {
       const v = this.acBuffer[i]
       if (v > mx) mx = v
       if (v < mn) mn = v

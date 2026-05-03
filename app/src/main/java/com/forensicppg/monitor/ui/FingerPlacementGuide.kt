@@ -23,19 +23,9 @@ import com.forensicppg.monitor.domain.PpgValidityState
 import com.forensicppg.monitor.domain.VitalReading
 
 /**
- * Guía única de contacto óptimo cPPG.
- *
- * Posición canónica (la única que la app guía):
- *   - Dedo ÍNDICE de la mano NO DOMINANTE.
- *   - Yema (pulpejo distal) cubriendo COMPLETAMENTE la cámara trasera y el LED de flash
- *     al mismo tiempo, sin huecos por donde entre luz ambiente.
- *   - Presión LIGERA: la suficiente para sellar luz ambiente sin blanquear la piel.
- *   - Mano apoyada sobre superficie firme. Codo apoyado. Antebrazo a la altura del corazón.
- *   - Inmóvil 3 s antes de iniciar y durante toda la captura. No hablar.
- *
- * Referencias técnicas: Mather et al. 2024 (Front. Digit. Health, scoping review FC-PPG vs ECG),
- * Wang/Xuan et al. 2023 (calibración cPPG smartphone), Scully 2012 / Lamonaca 2017 (oximetría
- * por cámara visible).
+ * Guía única de contacto óptimo cPPG: **pulgar**, yema distal, centrado sobre **lente + flash**,
+ * firme pero sin clipping. Referencias técnicas: revisión método contact-based smartphone PPG
+ * y calibración cPPG (Front. Digit. Health 2023, Wang et al.).
  */
 @Composable
 fun FingerPlacementGuide(
@@ -72,30 +62,29 @@ fun FingerPlacementGuide(
             }
         }
         Text(
-            "1) Dedo ÍNDICE de la mano NO dominante. Una sola posición correcta.",
+            "• Pulgar: yema (pulpa distal) centrada para cubrir el lente y el LED de flash; evita aristas donde entre luz ambiente.",
             color = Color(0xFFE8FFF4),
             fontFamily = FontFamily.Monospace,
             fontSize = 11.sp
         )
         Spacer(Modifier.height(6.dp))
         Text(
-            "2) La YEMA (pulpejo distal) cubre AL MISMO TIEMPO la cámara y el LED de flash. " +
-                "Sin huecos por donde entre luz ambiente.",
+            "• Si hay saturación u oscuridad extrema, ajusta presión lentamente hasta ver perfusión en la onda sin recortes.",
             color = Color(0xFFB8D8CC),
             fontFamily = FontFamily.Monospace,
             fontSize = 11.sp
         )
         Spacer(Modifier.height(6.dp))
         Text(
-            "3) PRESIÓN LIGERA. Si la piel se blanquea, vacía el lecho capilar y la onda desaparece.",
+            "• Cobrí flash + lente a la vez: en muchos equipos el LED está ligeramente hacia ARRIBA " +
+                "del centro físico — deslizá un poco el pulgar hasta notar pulsación en verde.",
             color = Color(0xFFB8D8CC),
             fontFamily = FontFamily.Monospace,
             fontSize = 11.sp
         )
         Spacer(Modifier.height(6.dp))
         Text(
-            "4) Apoye la mano y el codo sobre superficie firme. Antebrazo a la altura del corazón. " +
-                "Inmóvil 3 s antes de iniciar y durante toda la medición. No hable.",
+            "• Apoya brazo y teléfono; evita mover el dedo hasta que BPM y la forma de onda se estabilicen (típicamente ~10–25 s a ~30 FPS en protocolos de literatura revisada).",
             color = Color(0xFFB8D8CC),
             fontFamily = FontFamily.Monospace,
             fontSize = 11.sp
