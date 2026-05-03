@@ -370,7 +370,7 @@ private fun VitalReadingEvidenceFooter(
                         "Oximetría por ratio exige modelo sensor linealizado + ZLO (Wang et al. doi " +
                         "${ContactPpgLiteratureAnchors.XUAN_WANG_CALIBRATION_FRONT_DIG_HEALTH_2023_DOI}); " +
                         "esta app corrige sólo dentro de ese marco físico-metrológico."
-                reading.validityState.ordinal < PpgValidityState.PPG_VALID.ordinal ->
+                reading.validityState < PpgValidityState.PPG_VALID ->
                     "SpO₂: clase PPG evidencial inferior a «válido» — ver mensaje BPM / contacto estable."
                 else ->
                     "SpO₂ no mostrado: ventana (~10 s) con perfusión/SQI/movimiento/clip no aptos para índice clínico guardado."
