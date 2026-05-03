@@ -1,19 +1,17 @@
 import { ArrhythmiaScreening, type ArrhythmiaSummary } from './arrhythmia'
 import { BeatClassifier } from './beatClassifier'
-import { ChromaticGate } from './ChromaticGate'
 import { FingerContactDetector } from './contact'
 import { HeartRateFusion } from './fusion'
-import { LivePpgEvidenceGate } from './LivePpgEvidenceGate'
 import { PeakDetectorSsf } from './peakSsf'
 import { PpgPreprocessor } from './preprocessor'
 import { SignalQualityIndex } from './sqi'
 import { SpectralHeartRateEstimator } from './spectral'
 import { Spo2Estimator, type CalibrationProfile, type Spo2Result } from './spo2'
-import { PROCESSING } from '../constants/processing'
 import type {
   BeatEvent,
   BeatType,
   CameraFrameStats,
+  HypertensionRiskBand,
   MeasurementState,
   PpgSample,
   VitalReading
@@ -30,39 +28,47 @@ export interface PipelineStep {
 }
 
 const BLANK_READING = (state: MeasurementState, message: string): VitalReading => ({
-  bpm: 0,
+  bpm: null,
   bpmConfidence: 0,
-  spo2: 0,
+  spo2: null,
   spo2Confidence: 0,
   sqi: 0,
   perfusionIndex: 0,
   motionScore: 0,
-  rrMs: 0,
-  rrSdnnMs: 0,
-  pnn50: 0,
+  rrMs: null,
+  rrSdnnMs: null,
+  pnn50: null,
   beatsDetected: 0,
   abnormalBeats: 0,
   state,
   validityFlags: VALIDITY.NO_FINGER,
   message,
-  hypertensionRisk: 'NO_VALID_PPG',
-  bloodPressureSystolic: 0,
-  bloodPressureDiastolic: 0,
-  glucoseMgDl: 0,
-  lipidsMgDl: 0,
-  arrhythmiaStatus: 'NO_VALID_PPG',
-  reasonCodes: ['NO_VALID_PPG']
+  hypertensionRisk: null
 })
 
 /**
- * Pipeline PPG real, fail-closed, con una sola fuente de verdad biométrica.
+ * Pipeline PPG. Procesa UNA muestra por frame de cámara. La frecuencia de
+ * muestreo efectiva se mide por timestamps reales (fpsActual) y se usa como
+ * estimación para los filtros. No hay resampling: cada frame = una muestra,
+ * una decisión de detector, una actualización del HUD. Esto elimina los
+ * "micro-cortes" que ocurrían con los resamplers que saltaban frames.
  *
- * Cadena:
- *   frame -> preprocesado -> detector SSF -> SQI/chroma -> evidencia viva
- *   -> publicación clínica.
+ * Canales:
+ *   - Rojo y Verde procesados en paralelo por sus propios preprocesadores.
+ *   - El pipeline selecciona dinámicamente el canal con mayor AC reciente.
+ *   - La onda se muestra con la sístole hacia arriba (invertida).
  *
- * Regla madre:
- *   si la evidencia viva no es válida, biomarcadores se publican en cero.
+ * Latidos:
+ *   - PeakDetectorRobust (Pan-Tompkins adaptado): derivada² + integración
+ *     por ventana + threshold adaptativo + refractario fisiológico.
+ *
+ * SpO₂:
+ *   - Spo2Estimator avanzado con bandpass/detrender por canal, ratio-of-
+ *     ratios mediana en ventana de 5 s y EMA de salida.
+ *
+ * Sin calibración el SpO₂ se emite como estimación provisional (etiqueta
+ * "provisional" en la UI, confidence <= 0.55). Con calibración individual
+ * pasa a "clínico".
  */
 export class PpgPipeline {
   private readonly fsNominal: number
@@ -76,8 +82,6 @@ export class PpgPipeline {
   private readonly sqi: SignalQualityIndex
   private readonly fusion: HeartRateFusion
   private readonly contact: FingerContactDetector
-  private readonly chroma: ChromaticGate
-  private readonly evidence: LivePpgEvidenceGate
 
   private lastBeatTsMs: number | null = null
   private totalBeats = 0
@@ -105,8 +109,6 @@ export class PpgPipeline {
     this.sqi = new SignalQualityIndex()
     this.fusion = new HeartRateFusion()
     this.contact = new FingerContactDetector()
-    this.chroma = new ChromaticGate()
-    this.evidence = new LivePpgEvidenceGate()
     const bufN = Math.round(fsNominal * 3)
     this.acBufRed = new Float64Array(bufN)
     this.acBufGreen = new Float64Array(bufN)
@@ -123,7 +125,6 @@ export class PpgPipeline {
     this.classifier.reset()
     this.screening.reset()
     this.contact.reset()
-    this.evidence.reset()
     this.lastBeatTsMs = null
     this.totalBeats = 0
     this.abnormalBeats = 0
@@ -145,7 +146,6 @@ export class PpgPipeline {
     this.detector.reset()
     this.classifier.reset()
     this.screening.reset()
-    this.evidence.reset()
     this.lastBeatTsMs = null
     this.totalBeats = 0
     this.abnormalBeats = 0
@@ -170,13 +170,9 @@ export class PpgPipeline {
 
     if (contactDecision.state === 'NO_CONTACT') {
       this.resetOnContactLost()
-      const reasonCodes = ['NO_VALID_PPG', ...contactDecision.reasonCodes]
       return {
         sample: null,
-        reading: {
-          ...BLANK_READING('NO_CONTACT', 'Coloque el dedo sobre la cámara y el flash'),
-          reasonCodes
-        },
+        reading: BLANK_READING('NO_CONTACT', 'Coloque el dedo sobre la cámara y el flash'),
         beat: null,
         acceptedFrame: false,
         spo2Debug: null,
@@ -184,8 +180,8 @@ export class PpgPipeline {
       }
     }
 
-    // Alimentamos los filtros siempre durante contacto probable para que
-    // converjan antes de alcanzar VALID_LIVE_PPG.
+    // Alimentamos los filtros SIEMPRE (incluso en CONTACT_PARTIAL/WARMUP)
+    // para que converjan antes de llegar a MEASURING.
     const redOut = this.preRed.process(frame.redMean)
     const greenOut = this.preGreen.process(frame.greenMean)
     this.spo2.push(frame.redMean, frame.greenMean, frame.blueMean)
@@ -200,15 +196,13 @@ export class PpgPipeline {
     const useGreen = ampGreen > ampRed * 1.05
     const chosenFiltered = useGreen ? greenOut.filtered : redOut.filtered
     const chosenDisplay = useGreen ? greenOut.display : redOut.display
-    const chosenPolarity = 1
+    const chosenPolarity = -1 // Ambos canales bajan en sístole.
     const chosenPi = useGreen ? greenOut.perfusionIndex : redOut.perfusionIndex
 
     this.spectral.push(-chosenFiltered)
 
-    const canAnalyze = this.acFilled >= Math.round(this.fsNominal * 2)
-    let beatCandidate: BeatEvent | null = null
-    let pulseEvidence = false
-    if (canAnalyze) {
+    let beat: BeatEvent | null = null
+    if (stateAllowsMetrics(contactDecision.state)) {
       // El detector SSF ya valida rango fisiológico, coherencia y amplitud
       // internamente, así que aquí sólo aplicamos SQI mínimo.
       const d = this.detector.feed(chosenFiltered, frame.timestampMs, chosenPolarity)
@@ -217,7 +211,7 @@ export class PpgPipeline {
         const rr = prev !== null ? d.timestampMs - prev : null
         const bpmInstant = rr !== null && rr > 0 ? 60000 / rr : null
         const sqiQuick = this.estimateSqiQuick(chosenPi, motionScore, frame.clipHighRatio)
-        if (sqiQuick >= PROCESSING.MIN_SQI_QUICK_FOR_BEAT) {
+        if (sqiQuick >= 0.15) {
           const raw: BeatEvent = {
             timestampMs: d.timestampMs,
             amplitude: d.amplitude,
@@ -227,15 +221,13 @@ export class PpgPipeline {
             type: 'NORMAL' as BeatType,
             reason: ''
           }
-          this.lastBeatTsMs = d.timestampMs
-          this.totalBeats++
-          beatCandidate = raw
-          pulseEvidence = true
           const classified = this.classifier.classify(raw, sqiQuick)
           if (classified.type !== 'INVALID_SIGNAL') {
             this.screening.ingest(classified)
-            beatCandidate = classified
+            this.lastBeatTsMs = d.timestampMs
+            this.totalBeats++
             if (classified.type !== 'NORMAL') this.abnormalBeats++
+            beat = classified
           }
         }
       }
@@ -268,114 +260,82 @@ export class PpgPipeline {
       frame.clipHighRatio
     )
 
-    const chromaResult = this.chroma.evaluate(frame)
-    const forceValidFromSustainedRhythm =
-      this.totalBeats >= PROCESSING.MIN_VALID_BEATS &&
-      screeningSummary.rrCount >= PROCESSING.MIN_VALID_RR_COUNT &&
-      sqiValue >= PROCESSING.MIN_SQI_FOR_VALID &&
-      chromaResult.passed &&
-      chosenPi >= PROCESSING.MIN_PERFUSION_FOR_VALID &&
-      motionScore <= PROCESSING.MAX_MOTION_FOR_VALID
-    const evidenceResult = this.evidence.evaluate({
-      chromaPassed: chromaResult.passed,
-      hasPulseEvidence: pulseEvidence || forceValidFromSustainedRhythm,
-      sqi: sqiValue,
-      perfusionIndex: chosenPi,
-      motionScore,
-      clipHighRatio: frame.clipHighRatio,
-      clipLowRatio: frame.clipLowRatio
-    })
-
-    let allFlags = contactDecision.flags | chromaResult.flags
+    let allFlags = contactDecision.flags
     if (this.fpsMovingAvg > 1 && this.fpsMovingAvg < 12) allFlags |= VALIDITY.LOW_FPS
     if (chosenPi < 0.2) allFlags |= VALIDITY.LOW_PERFUSION
-    if (screeningSummary.rrCount < PROCESSING.MIN_VALID_RR_COUNT) allFlags |= VALIDITY.NOT_ENOUGH_BEATS
-
-    const finalState = evidenceResult.state === 'VALID_LIVE_PPG' ? 'VALID_LIVE_PPG' : 'PROBABLE_PPG'
+    if (!calibration && stateAllowsMetrics(contactDecision.state)) allFlags |= VALIDITY.CALIBRATION_MISSING
+    if (screeningSummary.rrCount < 3) allFlags |= VALIDITY.NOT_ENOUGH_BEATS
 
     const canShowBpm =
-      finalState === 'VALID_LIVE_PPG' &&
-      evidenceResult.shouldPublish &&
+      stateAllowsMetrics(contactDecision.state) &&
       fused.bpm !== null &&
-      screeningSummary.rrCount >= PROCESSING.MIN_VALID_RR_COUNT &&
-      sqiValue >= PROCESSING.MIN_SQI_FOR_VALID
+      this.totalBeats >= 5 &&
+      screeningSummary.rrCount >= 4 &&
+      sqiValue >= 0.25
     const canShowSpo2 = canShowBpm && spo2Result.spo2 !== null
-    const canScreenRhythm = finalState === 'VALID_LIVE_PPG' && screeningSummary.rrCount >= PROCESSING.MIN_VALID_RR_COUNT
 
     // EMA del BPM publicado: evita saltos 70→120→90 entre RR consecutivos.
-    let bpmPublished = 0
+    let bpmPublished: number | null = null
     if (canShowBpm && fused.bpm !== null) {
       if (this.bpmSmooth === null) this.bpmSmooth = fused.bpm
       else this.bpmSmooth += this.bpmEmaAlpha * (fused.bpm - this.bpmSmooth)
-      bpmPublished = Math.max(0, this.bpmSmooth)
+      bpmPublished = this.bpmSmooth
     } else {
       this.bpmSmooth = null
     }
 
+    // En CONTACT_PARTIAL emitimos sample para que la onda NO se corte visualmente
+    // mientras el usuario acomoda el dedo; el overlay de estado se mantiene.
     const sample: PpgSample = {
       timestampMs: frame.timestampMs,
       raw: useGreen ? frame.greenMean : frame.redMean,
       filtered: chosenFiltered,
+      // Invertido para que la sístole (caída en reflectancia) aparezca
+      // como PICO en pantalla — convención médica estándar.
       display: -chosenDisplay,
       sqi: sqiValue,
       perfusionIndex: chosenPi,
       motionScore,
-      valid: finalState === 'VALID_LIVE_PPG'
+      valid: stateAllowsMetrics(contactDecision.state)
     }
-
-    const combinedReasons = [
-      ...contactDecision.reasonCodes,
-      ...chromaResult.reasonCodes,
-      ...evidenceResult.reasonCodes
-    ]
-    if (spo2Result.reason !== 'ok') combinedReasons.push(`SPO2_${spo2Result.reason}`)
-    const reasonCodes = combinedReasons.length > 0 ? Array.from(new Set(combinedReasons)) : ['PPG_VALID']
 
     const reading: VitalReading = {
       bpm: bpmPublished,
       bpmConfidence: canShowBpm ? fused.confidence : 0,
-      spo2: canShowSpo2 ? (spo2Result.spo2 ?? 0) : 0,
+      spo2: canShowSpo2 ? spo2Result.spo2 : null,
       spo2Confidence: canShowSpo2 ? spo2Result.confidence : 0,
       sqi: sqiValue,
       perfusionIndex: chosenPi,
       motionScore,
-      rrMs: canShowBpm ? (screeningSummary.meanRr ?? 0) : 0,
-      rrSdnnMs: canShowBpm ? (screeningSummary.sdnnMs ?? 0) : 0,
-      pnn50: canShowBpm ? (screeningSummary.pnn50 ?? 0) : 0,
+      rrMs: canShowBpm ? screeningSummary.meanRr : null,
+      rrSdnnMs: canShowBpm ? screeningSummary.sdnnMs : null,
+      pnn50: canShowBpm ? screeningSummary.pnn50 : null,
       beatsDetected: this.totalBeats,
       abnormalBeats: this.abnormalBeats,
-      state: finalState,
+      state: contactDecision.state,
       validityFlags: allFlags,
-      message: this.composeMessage(finalState, allFlags, evidenceResult.reasonCodes),
-      hypertensionRisk: 'NO_VALID_PPG',
-      bloodPressureSystolic: 0,
-      bloodPressureDiastolic: 0,
-      glucoseMgDl: 0,
-      lipidsMgDl: 0,
-      arrhythmiaStatus: canScreenRhythm
-        ? screeningSummary.flagIrregular || this.abnormalBeats > 0
-          ? 'PATRON_IRREGULAR'
-          : 'SIN_HALLAZGOS'
-        : 'NO_VALID_PPG',
-      reasonCodes
+      message: this.composeMessage(contactDecision.state, allFlags, !calibration, canShowBpm),
+      hypertensionRisk: canShowBpm
+        ? this.hypertensionRisk(fused.bpm, screeningSummary, chosenPi, sqiValue)
+        : null
     }
 
     return {
       sample,
       reading,
-      beat: finalState === 'VALID_LIVE_PPG' ? beatCandidate : null,
-      acceptedFrame: stateAllowsMetrics(finalState),
+      beat,
+      acceptedFrame: stateAllowsMetrics(contactDecision.state),
       spo2Debug: spo2Result,
       screening: screeningSummary
     }
   }
 
   private estimateSqiQuick(pi: number, motion: number, clipHigh: number): number {
-    if (motion > PROCESSING.MAX_MOTION_FOR_VALID) return 0
-    const piN = Math.min(1, Math.max(0, (pi - PROCESSING.MIN_PERFUSION_FOR_VALID) / 1.2))
+    if (motion > 0.7) return 0
+    if (clipHigh > 0.3) return 0.1
+    const piN = Math.min(1, Math.max(0, pi / 3))
     const m = 1 - Math.min(1, Math.max(0, motion))
-    const c = 1 - Math.min(1, Math.max(0, clipHigh / 0.3))
-    return Math.min(1, Math.max(0, piN * m * c))
+    return Math.min(1, Math.max(0, piN * m))
   }
 
   private updateFps(timestampMs: number): void {
@@ -395,18 +355,38 @@ export class PpgPipeline {
   private composeMessage(
     state: MeasurementState,
     flags: number,
-    evidenceReasons: string[]
+    calibrationMissing: boolean,
+    measuringBpm: boolean
   ): string {
     if (state === 'NO_CONTACT') return 'Coloque el dedo sobre la cámara y el flash'
-    if (state === 'PROBABLE_PPG') return 'Adquiriendo evidencia pulsátil — mantenga el dedo inmóvil'
+    if (state === 'CONTACT_PARTIAL') return 'Acomodando dedo — manténgalo quieto'
     if (flags & VALIDITY.MOTION_HIGH) return 'Movimiento excesivo — inmovilice el dedo'
     if (flags & VALIDITY.CLIPPING_HIGH) return 'Saturación óptica — reduzca la presión'
     if (flags & VALIDITY.CLIPPING_LOW) return 'Imagen demasiado oscura — revise el flash'
     if (flags & VALIDITY.LOW_PERFUSION) return 'Baja perfusión — caliente el dedo'
     if (flags & VALIDITY.LOW_FPS) return 'FPS inestable — verifique condiciones del dispositivo'
-    if (state !== 'VALID_LIVE_PPG') return 'Entrada no validada'
-    if (evidenceReasons.length > 0) return 'PPG inestable — sostenga presión y quietud'
-    return 'PPG válido en vivo'
+    if (state === 'WARMUP') return 'Calentando sensor óptico — aguarde'
+    if (!measuringBpm) return 'Acumulando latidos válidos — no mover'
+    if (calibrationMissing) return 'SpO₂ estimación provisional — calibrar para uso clínico'
+    return 'Midiendo — mantenga el dedo inmóvil'
+  }
+
+  private hypertensionRisk(
+    bpm: number | null,
+    screening: ArrhythmiaSummary,
+    pi: number,
+    sqi: number
+  ): HypertensionRiskBand | null {
+    if (bpm === null || sqi < 0.4 || screening.rrCount < 8) return 'UNCERTAIN'
+    const cv = screening.coefficientOfVariation
+    const rmssd = screening.rmssdMs
+    if (cv === null || rmssd === null) return 'UNCERTAIN'
+    const piBand = pi >= 1
+    const stiff = cv < 0.03 && rmssd < 18 && bpm > 70 && piBand
+    const borderline = cv < 0.05 && rmssd < 25 && bpm > 65
+    if (stiff) return 'HYPERTENSIVE_PATTERN'
+    if (borderline) return 'BORDERLINE'
+    return 'NORMOTENSE'
   }
 }
 

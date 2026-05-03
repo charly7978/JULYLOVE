@@ -3,8 +3,8 @@ import { HeartRateFusion } from '../fusion'
 
 describe('HeartRateFusion', () => {
   const f = new HeartRateFusion()
-  it('null cuando SQI es extremadamente bajo', () => {
-    const r = f.fuse(72, 10, 74, 0.9, 0.03)
+  it('null cuando SQI es muy bajo', () => {
+    const r = f.fuse(72, 10, 74, 0.9, 0.2)
     expect(r.bpm).toBeNull()
     expect(r.source).toBe('bajo_sqi')
   })

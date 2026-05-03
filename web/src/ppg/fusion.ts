@@ -7,8 +7,7 @@ export interface FusedHeartRate {
 export class HeartRateFusion {
   constructor(
     private readonly tolerancePercent: number = 15,
-    private readonly minBeatsForRr: number = 5,
-    private readonly minSqiForFusion: number = 0.35
+    private readonly minBeatsForRr: number = 5
   ) {}
 
   fuse(
@@ -18,7 +17,7 @@ export class HeartRateFusion {
     specCoherence: number,
     sqi: number
   ): FusedHeartRate {
-    if (sqi < this.minSqiForFusion) return { bpm: null, confidence: 0, source: 'bajo_sqi' }
+    if (sqi < 0.35) return { bpm: null, confidence: 0, source: 'bajo_sqi' }
     const rrUsable = rrBpm !== null && rrBeats >= this.minBeatsForRr
     const specUsable = specBpm !== null && specCoherence >= 0.25
 
