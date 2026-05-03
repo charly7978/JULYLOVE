@@ -38,7 +38,8 @@ android {
         jvmTarget = "17"
         freeCompilerArgs += listOf(
             "-opt-in=kotlinx.coroutines.ExperimentalCoroutinesApi",
-            "-opt-in=kotlinx.coroutines.FlowPreview"
+            "-opt-in=kotlinx.coroutines.FlowPreview",
+            "-Xallow-broken-inline-lambdas"
         )
     }
     buildFeatures {
