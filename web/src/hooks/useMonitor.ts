@@ -21,7 +21,7 @@ const DEFAULT_READING: VitalReading = {
   abnormalBeats: 0,
   state: 'NO_CONTACT',
   validityFlags: 0,
-  message: 'Cubra cámara + flash con la yema del dedo índice',
+  message: 'Coloque el dedo sobre la cámara trasera',
   hypertensionRisk: 'NO_VALID_PPG',
   bloodPressureSystolic: 0,
   bloodPressureDiastolic: 0,
