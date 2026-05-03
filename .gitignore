@@ -4,6 +4,8 @@ app/build/
 build/
 .idea/
 .kotlin/
+.vscode/
+.qodo/
 
 local.properties
 
