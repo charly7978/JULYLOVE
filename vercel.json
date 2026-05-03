@@ -1,16 +1,7 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "buildCommand": "cd web && npm install && npm run build",
-  "outputDirectory": "web/dist",
-  "installCommand": "echo skip-root-install",
-  "framework": null,
-  "headers": [
-    {
-      "source": "/(.*)",
-      "headers": [
-        { "key": "Permissions-Policy", "value": "camera=(self), microphone=()" },
-        { "key": "Cross-Origin-Opener-Policy", "value": "same-origin" }
-      ]
-    }
-  ]
+  "buildCommand": "echo 'El cliente web PWA fue retirado del árbol principal; desplegar la app Android (APK).' && exit 1",
+  "outputDirectory": ".",
+  "installCommand": "echo skip",
+  "framework": null
 }
