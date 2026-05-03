@@ -38,6 +38,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.forensicppg.monitor.domain.PpgValidityState
 import com.forensicppg.monitor.domain.VitalReading
+import com.forensicppg.monitor.ppg.ContactPpgLiteratureAnchors
 import com.forensicppg.monitor.ppg.RoiGeometryPreset
 
 @Composable
@@ -135,7 +136,7 @@ fun MonitorScreen(
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                VitalsColumn(reading, fps)
+                VitalsColumn(reading, fps, calibration != null)
                 ArrhythmiaEventOverlay(reading, modifier = Modifier.fillMaxWidth())
                 DiagnosticsToggleRow(
                     showDiagnostics = showDiagnostics,
@@ -289,7 +290,7 @@ private fun TopStatusBar(reading: VitalReading, calibrated: Boolean, running: Bo
 }
 
 @Composable
-private fun VitalsColumn(reading: VitalReading, fps: Double) {
+private fun VitalsColumn(reading: VitalReading, fps: Double, profileLoaded: Boolean) {
     val bpmOk =
         reading.bpmSmoothed != null &&
             reading.bpmConfidence >= 0.28 &&
@@ -331,7 +332,66 @@ private fun VitalsColumn(reading: VitalReading, fps: Double) {
             VitalTile("FPS", "%.1f".format(fps), "", Color(0xFFAACCEE), modifier = Modifier.weight(1f))
             VitalTile("MOV.", "%.2f".format(reading.motionScore), "", Color(0xFFAACCEE), modifier = Modifier.weight(1f))
         }
+        VitalReadingEvidenceFooter(
+            reading = reading,
+            bpmShown = bpmOk,
+            spo2Shown = spo2Show,
+            profileLoaded = profileLoaded
+        )
     }
+}
+
+@Composable
+private fun VitalReadingEvidenceFooter(
+    reading: VitalReading,
+    bpmShown: Boolean,
+    spo2Shown: Boolean,
+    profileLoaded: Boolean
+) {
+    val msg = reading.messagePrimary.trim()
+    if (!bpmShown && msg.isNotEmpty()) {
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "Estado BPM (evidencial): $msg",
+            color = Color(0xFFB8DDE6),
+            fontFamily = FontFamily.Monospace,
+            fontSize = 10.sp,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 2.dp)
+        )
+    }
+    if (!spo2Shown) {
+        Spacer(Modifier.height(6.dp))
+        val spoilne =
+            when {
+                !profileLoaded ->
+                    "SpO₂ % absoluto: requiere perfil contra oxímetro de referencia (clínica). " +
+                        "Oximetría por ratio exige modelo sensor linealizado + ZLO (Wang et al. doi " +
+                        "${ContactPpgLiteratureAnchors.XUAN_WANG_CALIBRATION_FRONT_DIG_HEALTH_2023_DOI}); " +
+                        "esta app corrige sólo dentro de ese marco físico-metrológico."
+                reading.validityState.ordinal < PpgValidityState.PPG_VALID.ordinal ->
+                    "SpO₂: clase PPG evidencial inferior a «válido» — ver mensaje BPM / contacto estable."
+                else ->
+                    "SpO₂ no mostrado: ventana (~10 s) con perfusión/SQI/movimiento/clip no aptos para índice clínico guardado."
+            }
+        Text(
+            spoilne,
+            color = Color(0x99FFCCAA),
+            fontFamily = FontFamily.Monospace,
+            fontSize = 9.sp,
+            modifier = Modifier.fillMaxWidth()
+        )
+    }
+    Spacer(Modifier.height(8.dp))
+    Text(
+        "Reporte método cPPG reposo vs ECG: checklist Mather et al. doi:${ContactPpgLiteratureAnchors.MATHER_SCOPING_FRONT_DIG_HEALTH_2024_DOI} · " +
+            ContactPpgLiteratureAnchors.MATHER_SCOPING_FRONT_DIG_HEALTH_2024_URL,
+        color = Color(0x66AABBCC),
+        fontFamily = FontFamily.Monospace,
+        fontSize = 8.sp,
+        modifier = Modifier.fillMaxWidth()
+    )
 }
 
 @Composable
