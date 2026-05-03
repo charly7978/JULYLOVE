@@ -38,6 +38,8 @@ class PpgFrameAnalyzer(
     private val rb = Rolling(PpgAcquisitionTuning.CHANNEL_ROLLING_CAPACITY)
     private val gb = Rolling(PpgAcquisitionTuning.CHANNEL_ROLLING_CAPACITY)
     private val bb = Rolling(PpgAcquisitionTuning.CHANNEL_ROLLING_CAPACITY)
+    private val dcGreenAbs = Rolling(PpgAcquisitionTuning.CHANNEL_ROLLING_CAPACITY)
+    private val dcRedAbs = Rolling(PpgAcquisitionTuning.CHANNEL_ROLLING_CAPACITY)
     private val motionSmooth = AlphaSmoother(PpgAcquisitionTuning.MOTION_EMA_ALPHA)
     private var stableRoiFrames = 0
     private var roiFractionAdaptive: Double = PpgAcquisitionTuning.ROI_FRACTION_LOOSE
@@ -137,7 +139,8 @@ class PpgFrameAnalyzer(
                 val rgb = yuvToRgb(
                     xPix, yPixRow, yBuf, uBuf, vBuf,
                     yRow, yPix, uRow, uPix, vRow, vPix
-                ) ?: run {
+                )
+                if (rgb == null) {
                     xPix += step
                     continue
                 }

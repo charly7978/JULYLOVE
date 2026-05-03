@@ -333,6 +333,8 @@ class PpgPipeline(
                 maskCoverage = ppg.maskCoverage,
                 contactScore = ppg.contactScore,
                 motionScore = fusedMotion.coerceAtMost(1.0),
+                clippingHighRatio = ppg.clippingHighRatio,
+                clippingLowRatio = ppg.clippingLowRatio,
                 rrMs = if (allowsDerivedVitals) rhythmPost.meanMs else null,
                 rrSdnnMs = if (allowsDerivedVitals) rhythmPost.sdnn else null,
                 rmssdMs = if (allowsDerivedVitals) rhythmPost.rmssd else null,
