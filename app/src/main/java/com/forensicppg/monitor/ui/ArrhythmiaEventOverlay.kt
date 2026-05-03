@@ -20,10 +20,28 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.forensicppg.monitor.domain.HypertensionRiskBand
+import com.forensicppg.monitor.domain.PpgValidityState
 import com.forensicppg.monitor.domain.VitalReading
 
 @Composable
 fun ArrhythmiaEventOverlay(reading: VitalReading, modifier: Modifier = Modifier) {
+    if (reading.validityState.ordinal < PpgValidityState.PPG_VALID.ordinal) {
+        Box(
+            modifier = modifier
+                .background(Color(0xFF080D10), RoundedCornerShape(6.dp))
+                .border(1.dp, Color(0x55446677), RoundedCornerShape(6.dp))
+                .padding(10.dp)
+        ) {
+            Text(
+                "Arritmia / presión arterial: desactivado hasta PPG confirmado.",
+                color = Color(0xFF8899AA),
+                fontFamily = FontFamily.Monospace,
+                fontSize = 10.sp
+            )
+        }
+        return
+    }
+
     val risk = reading.hypertensionRisk
     val color = when (risk) {
         HypertensionRiskBand.NORMOTENSE -> Color(0xFF22FFAA)
@@ -38,12 +56,14 @@ fun ArrhythmiaEventOverlay(reading: VitalReading, modifier: Modifier = Modifier)
             .padding(10.dp)
     ) {
         Column {
-            Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                Text("CRIBADO ARRITMIA / PRESIÓN",
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "CRIBADO ARRITMIA / PRESIÓN",
                     color = Color(0xFF22FFAA),
                     fontFamily = FontFamily.Monospace,
                     fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold)
+                    fontWeight = FontWeight.Bold
+                )
             }
             Spacer(Modifier.height(4.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -53,12 +73,16 @@ fun ArrhythmiaEventOverlay(reading: VitalReading, modifier: Modifier = Modifier)
                     "${reading.abnormalBeatCandidates}",
                     if (reading.abnormalBeatCandidates > 0) Color(0xFFFF3344) else Color(0xFF22FFAA)
                 )
-                SmallStat("SDNN",
+                SmallStat(
+                    "SDNN",
                     reading.rrSdnnMs?.let { "%.0f ms".format(it) } ?: "—",
-                    Color(0xFFAACCEE))
-                SmallStat("pNN50",
+                    Color(0xFFAACCEE)
+                )
+                SmallStat(
+                    "pNN50",
                     reading.pnn50?.let { "%.0f%%".format(it) } ?: "—",
-                    Color(0xFFAACCEE))
+                    Color(0xFFAACCEE)
+                )
             }
             Spacer(Modifier.height(6.dp))
             Text(
@@ -69,7 +93,7 @@ fun ArrhythmiaEventOverlay(reading: VitalReading, modifier: Modifier = Modifier)
                 fontWeight = FontWeight.Bold
             )
             Text(
-                text = risk?.descEs ?: "Señal insuficiente para cribado",
+                text = risk?.descEs ?: "Datos insuficientes",
                 color = color.copy(alpha = 0.85f),
                 fontFamily = FontFamily.Monospace,
                 fontSize = 10.sp
@@ -80,11 +104,8 @@ fun ArrhythmiaEventOverlay(reading: VitalReading, modifier: Modifier = Modifier)
 
 @Composable
 private fun SmallStat(label: String, value: String, color: Color) {
-    Column(modifier = Modifier
-        .background(Color(0xFF0F171C), RoundedCornerShape(4.dp))
-        .border(1.dp, color.copy(alpha = 0.4f), RoundedCornerShape(4.dp))
-        .padding(horizontal = 6.dp, vertical = 4.dp)) {
-        Text(label, color = color.copy(alpha = 0.8f), fontFamily = FontFamily.Monospace, fontSize = 9.sp)
-        Text(value, color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+    Column {
+        Text(label, color = Color(0xFF88AABB), fontFamily = FontFamily.Monospace, fontSize = 9.sp)
+        Text(value, color = color, fontFamily = FontFamily.Monospace, fontSize = 12.sp, fontWeight = FontWeight.Bold)
     }
 }

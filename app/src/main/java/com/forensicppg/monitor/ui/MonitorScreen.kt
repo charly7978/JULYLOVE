@@ -1,7 +1,6 @@
 package com.forensicppg.monitor.ui
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,8 +18,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -38,8 +35,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.forensicppg.monitor.domain.PpgValidityState
 import com.forensicppg.monitor.domain.VitalReading
-import com.forensicppg.monitor.ppg.ContactPpgLiteratureAnchors
-import com.forensicppg.monitor.ppg.RoiGeometryPreset
 
 @Composable
 fun MonitorScreen(
@@ -55,8 +50,6 @@ fun MonitorScreen(
     val calibration by viewModel.calibrationProfile.collectAsState()
     val audioOn by viewModel.feedbackAudioOn.collectAsState()
     val vibOn by viewModel.feedbackVibrationOn.collectAsState()
-
-    val roiGeometryPreset by viewModel.roiGeometryPreset.collectAsState()
 
     var showDiagnostics by remember { mutableStateOf(false) }
     var showFingerPlacementGuide by remember { mutableStateOf(true) }
@@ -118,14 +111,8 @@ fun MonitorScreen(
                 }
                 if (running) {
                     FingerContactCoach(reading, modifier = Modifier.fillMaxWidth())
+                    AcquisitionBarsRow(reading, modifier = Modifier.fillMaxWidth())
                 }
-                RoiGeometryPresetSelectorRow(
-                    canPersist = cameraCfg != null,
-                    running = running,
-                    selected = roiGeometryPreset,
-                    onSelect = viewModel::setRoiGeometryPreset,
-                    modifier = Modifier.fillMaxWidth()
-                )
                 SignalQualityPanel(reading, modifier = Modifier.fillMaxWidth())
             }
             Spacer(Modifier.fillMaxWidth(0.01f))
@@ -147,7 +134,7 @@ fun MonitorScreen(
                     config = cameraCfg,
                     fpsActual = fps,
                     diagnostics = if (showDiagnostics) reading.diagnostics else null,
-                    roiPresetSummary = cameraCfg?.let { roiGeometryPreset.labelEs },
+                    roiPresetSummary = "ROI autodetectado (dedo)",
                     modifier = Modifier.fillMaxWidth()
                 )
             }
@@ -246,8 +233,15 @@ private fun TopStatusBar(reading: VitalReading, calibrated: Boolean, running: Bo
     val color = when (reading.validityState) {
         PpgValidityState.BIOMETRIC_VALID, PpgValidityState.PPG_VALID -> Color(0xFF22FFAA)
         PpgValidityState.PPG_CANDIDATE -> Color(0xFFFFDD22)
-        PpgValidityState.RAW_OPTICAL_ONLY -> Color(0xFFFFAA22)
-        PpgValidityState.NO_PHYSIOLOGICAL_SIGNAL -> Color(0xFFFF3344)
+        PpgValidityState.RAW_OPTICAL_ONLY,
+        PpgValidityState.SEARCHING -> Color(0xFFFFAA22)
+        PpgValidityState.NO_PHYSIOLOGICAL_SIGNAL,
+        PpgValidityState.QUIET_NO_PULSE -> Color(0xFFFF6644)
+        PpgValidityState.BAD_CONTACT,
+        PpgValidityState.LOW_LIGHT -> Color(0xFFFF9944)
+        PpgValidityState.CLIPPING -> Color(0xFFFF3344)
+        PpgValidityState.MOTION -> Color(0xFFFF5588)
+        PpgValidityState.LOW_PERFUSION -> Color(0xFFFFAA44)
     }
     Box(
         modifier = Modifier
@@ -290,13 +284,74 @@ private fun TopStatusBar(reading: VitalReading, calibrated: Boolean, running: Bo
 }
 
 @Composable
+private fun AcquisitionBarsRow(reading: VitalReading, modifier: Modifier = Modifier) {
+    Column(
+        modifier = modifier
+            .background(Color(0xDD060C12), RoundedCornerShape(6.dp))
+            .padding(horizontal = 10.dp, vertical = 6.dp)
+    ) {
+        Text(
+            "Contacto / saturación / movimiento",
+            color = Color(0xFFFFCC77),
+            fontFamily = FontFamily.Monospace,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Bold
+        )
+        Spacer(Modifier.height(6.dp))
+        LabeledBar("Contacto", reading.contactScore.coerceIn(0.0, 1.0), Color(0xFF44DDAA))
+        Spacer(Modifier.height(4.dp))
+        LabeledBar(
+            "Saturación (clip alto)",
+            (reading.clippingHighRatio / 0.12).coerceIn(0.0, 1.0),
+            Color(0xFFFF8866)
+        )
+        Spacer(Modifier.height(4.dp))
+        LabeledBar(
+            "Movimiento",
+            (reading.motionScore / 0.20).coerceIn(0.0, 1.0),
+            Color(0xFF66AAFF)
+        )
+    }
+}
+
+@Composable
+private fun LabeledBar(label: String, frac: Double, fillColor: Color) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            label,
+            color = Color(0xFFAACCCC),
+            fontFamily = FontFamily.Monospace,
+            fontSize = 9.sp,
+            modifier = Modifier.weight(0.38f),
+            maxLines = 1
+        )
+        Box(
+            modifier = Modifier
+                .weight(0.62f)
+                .height(10.dp)
+                .background(Color(0xFF1A2128), RoundedCornerShape(3.dp))
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(frac.toFloat().coerceIn(0.05f, 1f))
+                    .height(10.dp)
+                    .background(fillColor, RoundedCornerShape(3.dp))
+            )
+        }
+    }
+}
+
+@Composable
 private fun VitalsColumn(reading: VitalReading, fps: Double, profileLoaded: Boolean) {
     val bpmOk =
         reading.bpmSmoothed != null &&
-            reading.bpmConfidence >= 0.28 &&
-            reading.validityState.ordinal >= PpgValidityState.PPG_CANDIDATE.ordinal
+            reading.bpmConfidence >= 0.35 &&
+            reading.validityState.ordinal >= PpgValidityState.PPG_VALID.ordinal
     val bpmStr = reading.bpmSmoothed?.takeIf { bpmOk }?.let { "%.0f".format(it) } ?: "--"
-    val spo2Show = reading.spo2 != null && reading.spo2Confidence >= 0.2
+    val spo2Show =
+        reading.validityState.ordinal >= PpgValidityState.PPG_VALID.ordinal &&
+            reading.spo2 != null &&
+            reading.spo2Confidence >= 0.2
     val spo2Str = reading.spo2?.takeIf { spo2Show }?.let { "%.1f".format(it) } ?: "--"
     val rrStr = reading.rrMs?.let { "%.0f".format(it) } ?: "--"
     val piStr = "%.2f".format(reading.perfusionIndex)
@@ -330,7 +385,7 @@ private fun VitalsColumn(reading: VitalReading, fps: Double, profileLoaded: Bool
         }
         Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             VitalTile("FPS", "%.1f".format(fps), "", Color(0xFFAACCEE), modifier = Modifier.weight(1f))
-            VitalTile("MOV.", "%.2f".format(reading.motionScore), "", Color(0xFFAACCEE), modifier = Modifier.weight(1f))
+            VitalTile("MASK", "%.0f%%".format(reading.maskCoverage * 100), "", Color(0xFFAACCEE), modifier = Modifier.weight(1f))
         }
         VitalReadingEvidenceFooter(
             reading = reading,
@@ -365,15 +420,12 @@ private fun VitalReadingEvidenceFooter(
         Spacer(Modifier.height(6.dp))
         val spoilne =
             when {
+                reading.validityState.ordinal < PpgValidityState.PPG_VALID.ordinal ->
+                    "SpO₂ y pressión no se muestran hasta PPG confirmado (gates duros)."
                 !profileLoaded ->
-                    "SpO₂ % absoluto: requiere perfil contra oxímetro de referencia (clínica). " +
-                        "Oximetría por ratio exige modelo sensor linealizado + ZLO (Wang et al. doi " +
-                        "${ContactPpgLiteratureAnchors.XUAN_WANG_CALIBRATION_FRONT_DIG_HEALTH_2023_DOI}); " +
-                        "esta app corrige sólo dentro de ese marco físico-metrológico."
-                reading.validityState < PpgValidityState.PPG_VALID ->
-                    "SpO₂: clase PPG evidencial inferior a «válido» — ver mensaje BPM / contacto estable."
+                    "SpO₂ absoluto: requiere perfil calibrado contra oxímetro de referencia."
                 else ->
-                    "SpO₂ no mostrado: ventana (~10 s) con perfusión/SQI/movimiento/clip no aptos para índice clínico guardado."
+                    "SpO₂ no mostrado: condiciones de señal no aptas para valor clínico."
             }
         Text(
             spoilne,
@@ -383,15 +435,6 @@ private fun VitalReadingEvidenceFooter(
             modifier = Modifier.fillMaxWidth()
         )
     }
-    Spacer(Modifier.height(8.dp))
-    Text(
-        "Reporte método cPPG reposo vs ECG: checklist Mather et al. doi:${ContactPpgLiteratureAnchors.MATHER_SCOPING_FRONT_DIG_HEALTH_2024_DOI} · " +
-            ContactPpgLiteratureAnchors.MATHER_SCOPING_FRONT_DIG_HEALTH_2024_URL,
-        color = Color(0x66AABBCC),
-        fontFamily = FontFamily.Monospace,
-        fontSize = 8.sp,
-        modifier = Modifier.fillMaxWidth()
-    )
 }
 
 @Composable
@@ -435,71 +478,3 @@ private fun ControlBar(
     }
 }
 
-@Composable
-private fun RoiGeometryPresetSelectorRow(
-    canPersist: Boolean,
-    running: Boolean,
-    selected: RoiGeometryPreset,
-    onSelect: (RoiGeometryPreset) -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Column(
-        modifier = modifier
-            .background(Color(0xFF081018), RoundedCornerShape(6.dp))
-            .padding(horizontal = 8.dp, vertical = 6.dp)
-    ) {
-        Text(
-            "Preset ROI vs posición flash / LED lateral",
-            color = Color(0xFFB8E0CC),
-            fontFamily = FontFamily.Monospace,
-            fontSize = 10.sp,
-            fontWeight = FontWeight.Bold
-        )
-        Spacer(Modifier.height(6.dp))
-        Row(
-            modifier = Modifier.horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            RoiGeometryPreset.entries.forEach { preset ->
-                FilterChip(
-                    selected = preset == selected,
-                    onClick = {
-                        if (canPersist) onSelect(preset)
-                    },
-                    enabled = canPersist,
-                    label = {
-                        Text(
-                            preset.chipLabelEs,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 10.sp,
-                            maxLines = 1
-                        )
-                    },
-                    colors = FilterChipDefaults.filterChipColors(
-                        containerColor = Color(0xFF1A2830),
-                        labelColor = Color(0xFFCCDDEE),
-                        selectedContainerColor = Color(0xFF1B5E4A),
-                        selectedLabelColor = Color(0xFFEEFFFA),
-                        disabledContainerColor = Color(0xFF151A1E),
-                        disabledLabelColor = Color(0xFF556677)
-                    )
-                )
-            }
-        }
-        Spacer(Modifier.height(6.dp))
-        Text(
-            when {
-                !canPersist ->
-                    "Iniciá una medición una vez para recordar esta cámara; luego cambiás preset cuando quieras."
-                running ->
-                    "Activo · ${selected.labelEs} · aplica fotograma a fotograma."
-                else ->
-                    "Preset guardado por equipo/cámara. El próximo INICIAR cargará este ajuste."
-            },
-            color = Color(0x88CCEECC),
-            fontFamily = FontFamily.Monospace,
-            fontSize = 9.sp,
-            maxLines = 5
-        )
-    }
-}

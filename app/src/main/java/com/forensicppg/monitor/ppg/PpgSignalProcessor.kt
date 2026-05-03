@@ -13,13 +13,8 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 private const val FFT_SIZE = 512
-/** Mínimo de muestras para estimar espectro pulsátil (bootstrap ~2 s @ 30 Hz antes del FFT completo). */
 private const val SPECTRAL_BOOTSTRAP_MIN_SAMPLES = 64
 
-/**
- * Tamaños DFT descendente: usamos la ventana mayor que entre en buffer hasta [FFT_SIZE].
- * Así no queda [SpectrumSummary] con Fc=0 (bloqueaba [PpgPhysiologyClassifier] ~17 s al inicio).
- */
 private val SPECTRAL_FFT_STEPS_DESC: IntArray =
     intArrayOf(
         512, 448, 384, 352, 320, 288, 256, 224, 192, 176, 160, 144, 128,
@@ -42,23 +37,26 @@ private fun fftWindowSamples(haveSamples: Int): Int {
 }
 
 /**
- * Buffer circular grande, detrend, pasabanda Butterworth cardíaca y PSD (DFT estable en ventana fija).
+ * Buffer circular con **timestamps reales**: absorbancia verde como señal principal,
+ * pasabanda 0.7–3.5 Hz, espectro sobre ventana 8–12 s efectivos.
  */
 class PpgSignalProcessor(
     sampleRateHz: Double,
     bufferSeconds: Double = 25.0
 ) {
-    private val sr = sampleRateHz.coerceIn(14.0, 90.0)
-    private val cap = ceil(sr * bufferSeconds).toInt().coerceIn(480, 6000)
+    private val srNominal = sampleRateHz.coerceIn(14.0, 90.0)
+    private val cap = ceil(srNominal * bufferSeconds).toInt().coerceIn(480, 6000)
 
-    private val rawGreen = DoubleArray(cap)
-    private val rawRed = DoubleArray(cap)
+    private val sigGreen = DoubleArray(cap)
+    private val sigRedAbs = DoubleArray(cap)
+    private val timeNs = LongArray(cap)
     private var head = 0
     private var filled = false
 
-    private val detrend = Detrender(windowSamples = (sr * 4.5).toInt().coerceIn(48, 620))
-    private val bp = BandpassFilter(sr, lowHz = 0.42, highHz = 4.38)
+    private val detrend = Detrender(windowSamples = (srNominal * 4.5).toInt().coerceIn(48, 620))
+    private val bp = BandpassFilter(srNominal, lowHz = 0.7, highHz = 3.5)
     private val smoothDeque = ArrayDeque<Double>(16)
+    private val derivDeque = ArrayDeque<Double>(8)
 
     private var lastSpectrum = SpectrumSummary(
         dominantFreqHz = 0.0,
@@ -66,7 +64,8 @@ class PpgSignalProcessor(
         snrHeartDbEstimate = -40.0,
         coherenceRg = 0.0,
         autocorrPulseStrength = 0.0,
-        dcStability = 0.5
+        dcStability = 0.5,
+        searchDominantFreqHz = 0.0
     )
 
     data class SpectrumSummary(
@@ -75,45 +74,57 @@ class PpgSignalProcessor(
         val snrHeartDbEstimate: Double,
         val coherenceRg: Double,
         val autocorrPulseStrength: Double,
-        val dcStability: Double
+        val dcStability: Double,
+        /** Pico en banda ampliada 0.5–4 Hz (sólo exploración). */
+        val searchDominantFreqHz: Double
     )
 
     data class ProcessorOutput(
         val filteredWave: Double,
         val displaySmoothed: Double,
-        val spectrumSummary: SpectrumSummary
+        val derivativeSmoothed: Double,
+        val spectrumSummary: SpectrumSummary,
+        val instantaneousHz: Double
     )
 
     fun reset() {
         head = 0; filled = false
         detrend.reset(); bp.reset()
-        smoothDeque.clear()
-        rawGreen.fill(0.0); rawRed.fill(0.0)
-        lastSpectrum = SpectrumSummary(0.0, 0.0, -40.0, 0.0, 0.0, 0.5)
+        smoothDeque.clear(); derivDeque.clear()
+        sigGreen.fill(0.0); sigRedAbs.fill(0.0)
+        timeNs.fill(0L)
+        lastSpectrum = SpectrumSummary(0.0, 0.0, -40.0, 0.0, 0.0, 0.5, 0.0)
     }
 
     fun lastSpectrumSummary(): SpectrumSummary = lastSpectrum
     fun effectiveSamples(): Int = if (filled) cap else head
 
     fun ingest(sample: PpgSample): ProcessorOutput {
-        rawGreen[head] = sample.rawGreen
-        rawRed[head] = sample.rawRed
+        sigGreen[head] = sample.ppgGreenAbsorbance
+        sigRedAbs[head] = sample.ppgRedAbsorbance
+        timeNs[head] = sample.timestampNs
         head = (head + 1) % cap
         if (head == 0 && !filled) filled = true
 
-        val detrended = detrend.process(sample.rawGreen)
+        val detrended = detrend.process(sample.ppgGreenAbsorbance)
         val filt = bp.process(detrended)
+        val prevY = smoothDeque.lastOrNull() ?: filt
+        val deriv = filt - prevY
         smoothDeque.addLast(filt); while (smoothDeque.size > 7) smoothDeque.removeFirst()
+        derivDeque.addLast(deriv); while (derivDeque.size > 5) derivDeque.removeFirst()
+        val derivSm = derivDeque.average()
 
-        val segDc = chronological(rawGreen, min(560, effectiveSamples()))
+        val have = effectiveSamples()
+        val segDc = chronologicalValues(sigGreen, min(560, have))
+        val dtSeries = chronologicalDtSec(min(560, have))
+        val fsEff = estimateFsFromTimestamps(dtSeries)
         val dcCv = coefficientOfVariation(segDc)
         val dcStab = (1.0 - min(12.0, dcCv)).coerceIn(0.0, 1.0)
 
-        val have = effectiveSamples()
         val win = fftWindowSamples(have)
         lastSpectrum =
             if (win >= SPECTRAL_BOOTSTRAP_MIN_SAMPLES) {
-                computeSpectrum(dcStabilityHold = dcStab, nFft = win)
+                computeSpectrum(dcStabilityHold = dcStab, nFft = win, fsEffective = fsEff)
             } else {
                 lastSpectrum.copy(dcStability = dcStab)
             }
@@ -121,11 +132,13 @@ class PpgSignalProcessor(
         return ProcessorOutput(
             filteredWave = filt,
             displaySmoothed = smoothDeque.average(),
-            spectrumSummary = lastSpectrum
+            derivativeSmoothed = derivSm,
+            spectrumSummary = lastSpectrum,
+            instantaneousHz = fsEff
         )
     }
 
-    private fun chronological(buf: DoubleArray, nSamples: Int): DoubleArray {
+    private fun chronologicalValues(buf: DoubleArray, nSamples: Int): DoubleArray {
         val have = effectiveSamples()
         val n = min(nSamples, have).coerceAtLeast(1)
         val out = DoubleArray(n)
@@ -139,46 +152,89 @@ class PpgSignalProcessor(
         return out
     }
 
-    private fun computeSpectrum(dcStabilityHold: Double, nFft: Int): SpectrumSummary {
+    private fun chronologicalDtSec(nSamples: Int): DoubleArray {
+        val have = effectiveSamples()
+        val n = min(nSamples, have).coerceAtLeast(2)
+        val ts = LongArray(n)
+        for (t in 0 until n) {
+            val oldestOffset = have - n + t
+            var idx = head - oldestOffset - 1
+            while (idx < 0) idx += cap
+            idx %= cap
+            ts[t] = timeNs[idx]
+        }
+        val dt = DoubleArray(n - 1)
+        for (i in 0 until n - 1) {
+            val d = (ts[i + 1] - ts[i]) / 1_000_000_000.0
+            dt[i] = d.coerceIn(1.0 / 120.0, 0.25)
+        }
+        return dt
+    }
+
+    private fun estimateFsFromTimestamps(dt: DoubleArray): Double {
+        if (dt.isEmpty()) return srNominal
+        var s = 0.0
+        for (d in dt) s += d
+        val meanDt = s / dt.size.coerceAtLeast(1)
+        return (1.0 / meanDt).coerceIn(14.0, 90.0)
+    }
+
+    private fun computeSpectrum(dcStabilityHold: Double, nFft: Int, fsEffective: Double): SpectrumSummary {
         require(nFft >= SPECTRAL_BOOTSTRAP_MIN_SAMPLES && nFft <= FFT_SIZE)
-        val gRaw = chronological(rawGreen, nFft)
-        val rRaw = chronological(rawRed, nFft)
+        val gRaw = chronologicalValues(sigGreen, nFft)
+        val rRaw = chronologicalValues(sigRedAbs, nFft)
+        val dtSeg = chronologicalDtSec(nFft)
+        val fs = estimateFsFromTimestamps(dtSeg)
 
         val ff = gRaw.clone()
         subtractMean(ff)
         applyHann(ff)
         val magn = naivePower(ff)
 
-        val binHz = sr / nFft.toDouble()
-        val iLo = max(2, ceil(0.48 / binHz).toInt())
-        val iHi = min(magn.lastIndex - 2, floor(4.38 / binHz).toInt())
-        val hiSafe = max(iLo, iHi.coerceAtMost(magn.lastIndex - 2))
+        val binHz = fs / nFft.toDouble()
+        val iSearchLo = max(2, ceil(0.50 / binHz).toInt())
+        val iSearchHi = min(magn.lastIndex - 2, floor(4.0 / binHz).toInt())
+        val iValLo = max(2, ceil(0.70 / binHz).toInt())
+        val iValHi = min(magn.lastIndex - 2, floor(3.5 / binHz).toInt())
+
+        val hiSearch = max(iSearchLo, iSearchHi.coerceAtMost(magn.lastIndex - 2))
         val totalPow = max(1e-15, magn.sum())
-        val heartPow = sumSlice(magn, iLo, hiSafe)
+        val heartPow = sumSlice(magn, max(iValLo, iSearchLo), min(iValHi, hiSearch))
         val frac = heartPow / totalPow
 
         var peakPow = -1.0
-        var peakHz = (iLo * binHz).coerceIn(0.52, 2.05)
-        for (i in iLo..hiSafe) {
+        var peakHz = (iValLo * binHz).coerceIn(0.65, 3.5)
+        val hiVal = min(hiSearch, magn.lastIndex - 2)
+        for (i in max(iValLo, iSearchLo)..min(iValHi, hiVal)) {
             if (magn[i] > peakPow) {
                 peakPow = magn[i]; peakHz = i * binHz
             }
         }
         if (peakPow < 1e-30) peakPow = 1e-30
-        val noiseMed = maskedMedianOutside(magn, iLo, hiSafe)
+
+        var searchPeakHz = peakHz
+        var searchPow = -1.0
+        for (i in iSearchLo..hiSearch) {
+            if (magn[i] > searchPow) {
+                searchPow = magn[i]; searchPeakHz = i * binHz
+            }
+        }
+
+        val noiseMed = maskedMedianOutside(magn, iSearchLo, hiSearch)
         val snrDb = 10.0 * log10((peakPow / noiseMed.coerceAtLeast(1e-22)).coerceAtLeast(1e-14))
 
         val coh = pearson(rRaw, gRaw)
         val gAc = gRaw.clone(); subtractMean(gAc)
-        val ac = autocorrStrength(gAc, sr, nFft)
+        val ac = autocorrStrength(gAc, fs, nFft)
 
         return SpectrumSummary(
-            dominantFreqHz = peakHz.coerceIn(0.45, 4.5),
+            dominantFreqHz = peakHz.coerceIn(0.65, 3.6),
             heartBandFraction = frac.coerceIn(0.0, 1.0),
             snrHeartDbEstimate = snrDb.coerceIn(-40.0, 35.0),
             coherenceRg = coh.coerceIn(0.0, 1.0),
             autocorrPulseStrength = ac.coerceIn(0.0, 1.0),
-            dcStability = dcStabilityHold
+            dcStability = dcStabilityHold,
+            searchDominantFreqHz = searchPeakHz.coerceIn(0.48, 4.2)
         )
     }
 }
@@ -281,9 +337,8 @@ private fun pearson(x: DoubleArray, y: DoubleArray): Double {
 private fun autocorrStrength(x: DoubleArray, srHz: Double, nFftHint: Int): Double {
     val n = min(x.size, nFftHint)
     if (n < SPECTRAL_BOOTSTRAP_MIN_SAMPLES) return 0.0
-    /** Lags 0.52–4.4 Hz ⇒ ~lag 7–62 @ ~30 Hz. */
-    val lagMin = max(4, ceil(srHz / 4.42).toInt().coerceAtMost(max(8, n / 8)))
-    var lagMax = min(n / 3, ceil(srHz / 0.52).toInt()).coerceAtLeast(lagMin)
+    val lagMin = max(4, ceil(srHz / 4.2).toInt().coerceAtMost(max(8, n / 8)))
+    var lagMax = min(n / 3, ceil(srHz / 0.65).toInt()).coerceAtLeast(lagMin)
     lagMax = min(lagMax, max(lagMin, n / 3))
     var best = 0.0
     for (lag in lagMin..lagMax) {

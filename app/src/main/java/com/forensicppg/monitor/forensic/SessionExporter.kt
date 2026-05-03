@@ -176,7 +176,7 @@ class SessionExporter(private val context: Context) {
                 "ZLO efectivo — R:${s.sensorZloR ?: "—"} G:${s.sensorZloG ?: "—"} B:${s.sensorZloB ?: "—"} " +
                     "origen:${s.zloSourceNote ?: "—"}"
             )
-            appendLine("ROI geometría (preset LED/lente): ${s.roiGeometryPresetId ?: "—"}")
+            appendLine("ROI (autodetección / dedo): ${s.roiGeometryPresetId ?: "—"}")
         })
     }
 }

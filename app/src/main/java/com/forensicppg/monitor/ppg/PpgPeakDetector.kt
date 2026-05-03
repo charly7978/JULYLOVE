@@ -8,7 +8,9 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.ceil
 
-/** Detección de picos físicos tardíos con ventana móvil; ignora clasificadores de bajo nivel evidencial. */
+/**
+ * Picos sólo con evidencia PPG; RR inicial 300–1500 ms; mínimo 5 latidos para BPM (en pipeline).
+ */
 class PpgPeakDetector(
     sampleRateHz: Double,
     private val rhythm: RhythmAnalyzer
@@ -23,14 +25,12 @@ class PpgPeakDetector(
     private var lastEmittedNs: Long? = null
     private var prevFiltered = Double.NaN
 
-    /** RR mín/máximo fisiológicos razonables (adultos) en milisegundos. */
-    private val minRRms = 285.0
-    private val maxRRms = 2080.0
+    private val minRRms = 300.0
+    private val maxRRms = 1500.0
 
-    /** Distancia temporal mínima entre picos coherentes (~max ~210 BPM) */
     private val minPeakGapNs get() = (minRRms * 1e6).toLong()
 
-    private data class Pk(val tsNs: Long, val y: Double)
+    private data class Pk(val tsNs: Long, val y: Double, val dy: Double)
 
     fun reset() {
         buf.clear()
@@ -49,11 +49,17 @@ class PpgPeakDetector(
     fun onSample(
         timestampNs: Long,
         filteredWave: Double,
+        derivativeWave: Double,
         sqiComposite: Double,
         validityState: PpgValidityState,
-        opticalMotionSmoothed: Double
+        opticalMotionSmoothed: Double,
+        maskCoverage: Double,
+        stabilizationActive: Boolean
     ): ConfirmedBeat? {
-        buf.addLast(Pk(timestampNs, filteredWave))
+        if (stabilizationActive) return null
+        if (maskCoverage < 0.70) return null
+
+        buf.addLast(Pk(timestampNs, filteredWave, derivativeWave))
         while (buf.size > 360) buf.removeFirst()
 
         if (!prevFiltered.isFinite()) {
@@ -63,42 +69,27 @@ class PpgPeakDetector(
         val spike = abs(filteredWave - prevFiltered)
         prevFiltered = filteredWave
 
-        val validityOk =
-            validityState.ordinal >= PpgValidityState.PPG_CANDIDATE.ordinal ||
-                (
-                    validityState == PpgValidityState.RAW_OPTICAL_ONLY &&
-                        sqiComposite >= 0.48 &&
-                        opticalMotionSmoothed < 0.44
-                    )
+        val validityOk = validityState.ordinal >= PpgValidityState.PPG_CANDIDATE.ordinal
         if (
-            validityState == PpgValidityState.NO_PHYSIOLOGICAL_SIGNAL ||
+            validityState.ordinal <= PpgValidityState.QUIET_NO_PULSE.ordinal ||
             !validityOk
         ) {
             return null
         }
-        val sqiPeakGate = if (opticalMotionSmoothed < 0.38) 0.31 else 0.35
-        if (sqiComposite < sqiPeakGate) {
-            return null
-        }
-        if (opticalMotionSmoothed > 0.70 && spike > 0.18) {
-            return null
-        }
+        if (sqiComposite < 0.42) return null
+        if (opticalMotionSmoothed > 0.18 && spike > 0.14) return null
         val lastTs = lastEmittedNs
-        if (buf.size < 68) return null
+        if (buf.size < 72) return null
 
-        /** Vecindad proporcional (~150 ms cada lado ) */
-        val neigh = max(6, ceil(0.148 * sr).toInt())
-
+        val neigh = max(6, ceil(0.15 * sr).toInt())
         val list = buf.toMutableList()
 
-        /** Buscar último índice calificable antes del tail ruidoso */
         for (i in (list.size - neigh - 3) downTo neigh + 1) {
             if (i + neigh >= list.size - 4) continue
             val cen = list[i]
-            /** No demasiado reciente versus tail para garantizar soporte bilateral */
             if (list.lastIndex - i < neigh + 3) continue
-            /** Máximo local clásico sobre vecinos inmediatos y medios rangos cortos */
             if (!(cen.y >= list[i - 1].y && cen.y > list[i + 1].y)) continue
+            if (cen.dy <= 0.0) continue
 
             val leftMin = minSliceCorrect(list, i - neigh, i - 2)
             val rightMin = minSliceCorrect(list, i + 2, i + neigh)
@@ -106,20 +97,18 @@ class PpgPeakDetector(
             val base = kotlin.math.min(leftMin, rightMin)
             val prom = cen.y - base
             val mad = residualMadAround(list, i)
-            val gateProm = max(2.12 * mad, abs(cen.y) * 0.062)
+            val gateProm = max(2.5 * mad, abs(cen.y) * 0.072)
 
-            if (prom <= gateProm || prom < abs(cen.y) * 0.054) continue
+            if (prom <= gateProm || prom < abs(cen.y) * 0.058) continue
 
             if (lastTs != null && cen.tsNs - lastTs < minPeakGapNs) continue
 
-            val rrMs: Double?
-            rrMs = if (lastTs == null) {
-                null
-            } else {
-                (cen.tsNs - lastTs) / 1_000_000.0
-            }
+            val rrMs: Double? =
+                if (lastTs == null) null
+                else (cen.tsNs - lastTs) / 1_000_000.0
+
             if (rrMs != null && (rrMs < minRRms || rrMs > maxRRms)) {
-                refuse("rr_fuera_fisiolog_rr=$rrMs")
+                refuse("rr_fuera=${"%.0f".format(rrMs)}")
                 continue
             }
 
@@ -129,10 +118,8 @@ class PpgPeakDetector(
             lastEmittedNs = cen.tsNs
             stats.confirmedSession++
 
-            val confShape = ((prom / (gateProm.coerceAtLeast(1e-5))).coerceIn(0.0, 1.45))
-                .coerceAtMost(1.0)
-
-            val conf = ((confShape * 0.40) + (sqiComposite.coerceAtMost(1.0) * 0.60)).coerceIn(0.0, 1.0)
+            val confShape = ((prom / (gateProm.coerceAtLeast(1e-5))).coerceIn(0.0, 1.35)).coerceAtMost(1.0)
+            val conf = ((confShape * 0.42) + (sqiComposite.coerceAtMost(1.0) * 0.58)).coerceIn(0.0, 1.0)
 
             return ConfirmedBeat(
                 timestampNs = cen.tsNs,

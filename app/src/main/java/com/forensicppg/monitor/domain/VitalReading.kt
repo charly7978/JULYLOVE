@@ -22,6 +22,10 @@ data class VitalReading(
     val snrBandDbEstimate: Double = 0.0,
     val dominantHeartHz: Double = 0.0,
     val perfusionIndex: Double = 0.0,
+    /** Cobertura máscara dedo [0..1]. */
+    val maskCoverage: Double = 0.0,
+    /** Contacto óptico compuesto [0..1]. */
+    val contactScore: Double = 0.0,
     val motionScore: Double = 0.0,
     val rrMs: Double? = null,
     val rrSdnnMs: Double? = null,

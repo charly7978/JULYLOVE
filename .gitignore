@@ -7,7 +7,10 @@ build/
 
 local.properties
 
-# Artefactos firmados / binarios grandes
+# Web archivada (duplicado de pipeline; no es módulo Gradle)
+_archived_web_ppg_duplicate/
+
+# JVM crash logs
 *.apk
 *.aab
 *.jks

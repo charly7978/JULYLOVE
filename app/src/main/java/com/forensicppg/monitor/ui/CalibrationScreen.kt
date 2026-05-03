@@ -108,10 +108,10 @@ fun CalibrationScreen(
                 Text("Cancelar", color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
             }
             Button(
-                onClick = { viewModel.revertSensorZloToLiterature() },
+                onClick = { viewModel.clearPersistedSensorZlo() },
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF883333))
             ) {
-                Text("Ancla lit.", color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+                Text("Borrar ZLO", color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
             }
         }
         Spacer(Modifier.height(12.dp))

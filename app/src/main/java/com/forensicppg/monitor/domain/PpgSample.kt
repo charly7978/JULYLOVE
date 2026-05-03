@@ -1,37 +1,56 @@
 package com.forensicppg.monitor.domain
 
 /**
- * Una muestra coherente con un frame óptico real: bandas ROI, estadística y metadatos
- * temporales incluyendo jitter de captura. No debe fabricarse sintéticamente.
+ * Muestra coherente con un frame óptico real. Si el extractor devuelve `null`,
+ * no hubo contacto óptico válido — el pipeline no debe inventar señal.
  */
 data class PpgSample(
     val timestampNs: Long,
     val monotonicRealtimeNs: Long,
-    /** ROI medias antes de aplicar corrección ZLO (misma convención RGB que raw*). */
+    /** Medias ROI antes de ZLO (RGB 0–255, mismo espacio que captura). */
     val roiMeanPreZloRed: Double,
     val roiMeanPreZloGreen: Double,
     val roiMeanPreZloBlue: Double,
-    /** Medias tras restar offsets ZLO (pipeline / SpO₂ / DSP usan estos). */
+    /** Robustos tras corrección ZLO (DC digital); usados por SpO₂ / coherencia. */
     val rawRed: Double,
     val rawGreen: Double,
     val rawBlue: Double,
-    /** Señal preprocesada normalmente basada en el canal principal (typ. verde) */
+    /** Absorbancia relativa -ln(I/I_dc) en el canal principal (típ. verde). */
+    val ppgGreenAbsorbance: Double,
+    val ppgRedAbsorbance: Double,
+    /** Señal mostrada / DSP (absorbancia filtrada o 0 si aún no procede). */
     val filteredPrimary: Double,
     val displayWave: Double,
     val roiStats: RoiChannelStats,
     val clippingHighRatio: Double,
     val clippingLowRatio: Double,
+    /** Movimiento óptico intra-ROI [0..1]. */
     val motionScoreOptical: Double,
     val exposureDiagnostics: ExposureDiagnostics,
     val lowLightSuspected: Boolean,
-    /** SQI compuesto último ciclo DSP [0..1] */
+    /** Cobertura de la máscara de dedo dentro del ROI usado [0..1]. */
+    val maskCoverage: Double,
+    /** Coherencia dedo + perfil cromático + cobertura [0..1]. */
+    val contactScore: Double,
+    /** FPS instantáneo estimado (ventana corta de timestamps). */
+    val instantaneousFpsHz: Double,
+    /**
+     * ROI contraído alrededor de la región útil (dedo detectado).
+     * Si no hay dedo, los valores serán 0.
+     */
+    val roiBoundingLeft: Int,
+    val roiBoundingTop: Int,
+    val roiBoundingWidth: Int,
+    val roiBoundingHeight: Int,
+    /** Motivo de rechazo si la muestra es marginal (p. ej. dedo parcial). Vacío si OK. */
+    val rejectReason: String,
+    /** Si es falso, la UI no debe dibujar morfología cardíaca (solo línea técnica). */
+    val waveformDisplayAllowed: Boolean = false,
     val sqi: Double,
-    /** Canales paralelos cuando el procesador DSP los proporciona */
     val filteredSecondary: Double? = null
 ) {
     val perfusionIndexGreen: Double get() = roiStats.perfusionIndexGreenPct
 
-    /** Alias documentado para mezclas IMU vs óptica en capas superiores. */
     val motionScore: Double get() = motionScoreOptical
 }
 
@@ -46,6 +65,21 @@ data class RoiChannelStats(
     val redMedian: Double,
     val greenMedian: Double,
     val blueMedian: Double,
+    val redTrimmedMean2080: Double,
+    val greenTrimmedMean2080: Double,
+    val blueTrimmedMean2080: Double,
+    val redP05: Double,
+    val greenP05: Double,
+    val blueP05: Double,
+    val redP50: Double,
+    val greenP50: Double,
+    val blueP50: Double,
+    val redP95: Double,
+    val greenP95: Double,
+    val blueP95: Double,
+    val redMad: Double,
+    val greenMad: Double,
+    val blueMad: Double,
     val saturationR01: Double,
     val saturationG01: Double,
     val saturationB01: Double,
@@ -56,6 +90,18 @@ data class RoiChannelStats(
     val redAcDc: Double,
     val greenAcDc: Double,
     val blueAcDc: Double,
-    /** Varianza espacial agregada dentro del ROI (estabilidad estructura) */
     val roiVarianceLuma: Double
-)
+) {
+    fun fingerProfileScore(): Double {
+        val rg = redDominanceRg
+        val okRg = when {
+            rg in 1.02..1.85 -> 1.0
+            rg in 0.92..2.05 -> 0.55
+            else -> 0.12
+        }
+        val gdc = greenAcDc.coerceIn(0.0, 0.35)
+        val perf = (perfusionIndexGreenPct / 85.0).coerceIn(0.0, 1.2)
+        return (0.45 * okRg + 0.35 * minOf(perf, 1.0) + 0.20 * minOf(gdc * 4.0, 1.0))
+            .coerceIn(0.0, 1.0)
+    }
+}
