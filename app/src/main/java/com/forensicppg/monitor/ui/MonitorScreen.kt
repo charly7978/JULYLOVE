@@ -302,7 +302,7 @@ private fun AcquisitionBarsRow(reading: VitalReading, modifier: Modifier = Modif
         Spacer(Modifier.height(4.dp))
         LabeledBar(
             "Saturación (clip alto)",
-            (reading.clippingHighRatio / 0.12).coerceIn(0.0, 1.0),
+            if (reading.clippingSuspectedHigh) 1.0 else 0.0,
             Color(0xFFFF8866)
         )
         Spacer(Modifier.height(4.dp))
