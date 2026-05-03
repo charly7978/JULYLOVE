@@ -35,6 +35,8 @@ data class MeasurementSession(
     var sensorZloG: Double? = null,
     var sensorZloB: Double? = null,
     var zloSourceNote: String? = null,
+    /** Preset ROI vs posición LED/lente persistido para esta cámara (`RoiGeometryPreset.presetId`). */
+    var roiGeometryPresetId: String? = null,
     var calibrationProfileId: String? = null,
     val samples: MutableList<PpgSample> = mutableListOf(),
     val beats: MutableList<ConfirmedBeat> = mutableListOf(),

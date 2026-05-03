@@ -43,6 +43,17 @@ class PpgFrameAnalyzer(
     private var stableRoiFrames = 0
     private var roiFractionAdaptive: Double = PpgAcquisitionTuning.ROI_FRACTION_LOOSE
 
+    private val roiGeomLock = Any()
+    private var roiVyPreset = RoiGeometryPreset.defaultResolved().verticalBiasFracOfHeight
+    private var roiVxPreset = RoiGeometryPreset.defaultResolved().horizontalBiasFracOfWidth
+
+    fun configureRoiGeometryPreset(preset: RoiGeometryPreset) {
+        synchronized(roiGeomLock) {
+            roiVyPreset = preset.verticalBiasFracOfHeight
+            roiVxPreset = preset.horizontalBiasFracOfWidth
+        }
+    }
+
     fun configureSensorZlo(red: Double, green: Double, blue: Double, sourceBrief: String) {
         synchronized(zloLock) {
             zloR = red.coerceAtLeast(0.0)
@@ -80,8 +91,15 @@ class PpgFrameAnalyzer(
             zBrief = zloDesc
         }
 
+        val rvY: Double
+        val rvX: Double
+        synchronized(roiGeomLock) {
+            rvY = roiVyPreset
+            rvX = roiVxPreset
+        }
+
         updateAdaptiveRoiFraction()
-        val roi = roiSelector.pickRoi(width, height, roiFractionAdaptive)
+        val roi = roiSelector.pickRoi(width, height, roiFractionAdaptive, rvY, rvX)
 
         val yPlane = planes[0]
         val uPlane = planes[1]

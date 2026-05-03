@@ -77,6 +77,7 @@ class SessionExporter(private val context: Context) {
         o.put("sensorZloG", if (s.sensorZloG != null) s.sensorZloG else JSONObject.NULL)
         o.put("sensorZloB", if (s.sensorZloB != null) s.sensorZloB else JSONObject.NULL)
         o.put("zloSourceNote", s.zloSourceNote ?: JSONObject.NULL)
+        o.put("roiGeometryPresetId", s.roiGeometryPresetId ?: JSONObject.NULL)
         o.put("calibrationProfileId", s.calibrationProfileId ?: JSONObject.NULL)
         o.put("finalBpmMean", s.finalBpmMean ?: JSONObject.NULL)
         o.put("finalBpmSdnn", s.finalBpmSdnn ?: JSONObject.NULL)
@@ -175,6 +176,7 @@ class SessionExporter(private val context: Context) {
                 "ZLO efectivo — R:${s.sensorZloR ?: "—"} G:${s.sensorZloG ?: "—"} B:${s.sensorZloB ?: "—"} " +
                     "origen:${s.zloSourceNote ?: "—"}"
             )
+            appendLine("ROI geometría (preset LED/lente): ${s.roiGeometryPresetId ?: "—"}")
         })
     }
 }

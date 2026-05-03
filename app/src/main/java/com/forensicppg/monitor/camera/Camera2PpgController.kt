@@ -26,6 +26,7 @@ import com.forensicppg.monitor.domain.ExposureDiagnostics
 import com.forensicppg.monitor.domain.PpgSample
 import com.forensicppg.monitor.ppg.AppliedSensorZlo
 import com.forensicppg.monitor.ppg.PpgFrameAnalyzer
+import com.forensicppg.monitor.ppg.RoiGeometryPreset
 import com.forensicppg.monitor.ppg.PpgAcquisitionTuning.FRAME_DROP_GAP_MULTIPLIER
 import com.forensicppg.monitor.ppg.PpgAcquisitionTuning.IMAGE_READER_MAX_IMAGES
 import kotlinx.coroutines.channels.BufferOverflow
@@ -82,6 +83,10 @@ class Camera2PpgController(private val context: Context) {
     }
 
     fun currentSensorZlo(): AppliedSensorZlo = analyzer.currentSensorZlo()
+
+    fun configureRoiGeometryPreset(preset: RoiGeometryPreset) {
+        analyzer.configureRoiGeometryPreset(preset)
+    }
 
     fun hasCameraPermission(): Boolean =
         ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==

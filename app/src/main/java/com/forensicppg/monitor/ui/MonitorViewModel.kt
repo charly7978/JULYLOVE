@@ -23,6 +23,8 @@ import com.forensicppg.monitor.ppg.CalibrationPoint
 import com.forensicppg.monitor.ppg.CalibrationProfile
 import com.forensicppg.monitor.ppg.DeviceCalibrationManager
 import com.forensicppg.monitor.ppg.LiteratureZloFallback
+import com.forensicppg.monitor.ppg.RoiGeometryPreset
+import com.forensicppg.monitor.ppg.RoiGeometryStore
 import com.forensicppg.monitor.ppg.SensorZloStore
 import com.forensicppg.monitor.sensors.MotionArtifactEstimator
 import com.forensicppg.monitor.sensors.MotionSensorController
@@ -47,6 +49,7 @@ class MonitorViewModel(application: Application) : AndroidViewModel(application)
     private val motionEstimator = MotionArtifactEstimator()
     private val calibrationManager = DeviceCalibrationManager(application)
     private val sensorZloStore = SensorZloStore(application)
+    private val roiGeometryStore = RoiGeometryStore(application)
     private var beatFeedback = BeatFeedbackController(application)
 
     private var pipeline: PpgPipeline? = null
@@ -104,6 +107,20 @@ class MonitorViewModel(application: Application) : AndroidViewModel(application)
     private val _sensorZloStatus = MutableStateFlow("")
     val sensorZloStatus: StateFlow<String> = _sensorZloStatus.asStateFlow()
 
+    private val _roiGeometryPreset = MutableStateFlow(RoiGeometryPreset.defaultResolved())
+    val roiGeometryPreset: StateFlow<RoiGeometryPreset> = _roiGeometryPreset.asStateFlow()
+
+    fun setRoiGeometryPreset(preset: RoiGeometryPreset) {
+        val cid = _cameraConfig.value?.cameraId ?: return
+        val dm = calibrationManager.currentDeviceModel()
+        roiGeometryStore.save(dm, cid, preset)
+        _roiGeometryPreset.value = preset
+        if (_running.value) {
+            camera.configureRoiGeometryPreset(preset)
+            session?.roiGeometryPresetId = preset.presetId
+        }
+    }
+
     fun setFeedbackAudio(enabled: Boolean) {
         _feedbackAudioOn.value = enabled
     }
@@ -132,6 +149,14 @@ class MonitorViewModel(application: Application) : AndroidViewModel(application)
                         " — capture datos oscuros para mejorar modelo."
             }
         }
+    }
+
+    private fun applyResolvedRoiGeometry(cameraId: String) {
+        val dm = calibrationManager.currentDeviceModel()
+        val presetId = roiGeometryStore.loadPresetId(dm, cameraId)
+        val preset = RoiGeometryPreset.fromPersistedId(presetId)
+        _roiGeometryPreset.value = preset
+        camera.configureRoiGeometryPreset(preset)
     }
 
     /** Inicia colección (~2 s quietos): tapón opaco mismo flash táctico, sin pulso fisiológico. */
@@ -174,6 +199,7 @@ class MonitorViewModel(application: Application) : AndroidViewModel(application)
                 val tf = cfg.targetFpsRange.second.coerceAtLeast(15)
 
                 applyResolvedSensorZlo(cfg.cameraId)
+                applyResolvedRoiGeometry(cfg.cameraId)
 
                 val s = MeasurementSession(
                     sessionId = UUID.randomUUID().toString(),
@@ -192,6 +218,7 @@ class MonitorViewModel(application: Application) : AndroidViewModel(application)
                 s.frameDurationNs = cfg.manualFrameDurationNs
                 s.targetFps = tf
                 s.ispAcquisitionSummary = cfg.ispAcquisitionSummary
+                s.roiGeometryPresetId = _roiGeometryPreset.value.presetId
 
                 session = s
                 snapshotSensorZloToSession()

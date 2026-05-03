@@ -14,12 +14,15 @@ class RoiSelector(
         frameWidth: Int,
         frameHeight: Int,
         fractionOverride: Double? = null,
-        verticalBiasFracOfHeight: Double = -0.055
+        verticalBiasFracOfHeight: Double = 0.0,
+        horizontalBiasFracOfWidth: Double = 0.0
     ): Roi {
         val frac = (fractionOverride ?: centerFraction).coerceIn(0.35, 0.82)
         val w = (frameWidth * frac).toInt().coerceAtLeast(16)
         val h = (frameHeight * frac).toInt().coerceAtLeast(16)
-        val x = ((frameWidth - w) / 2).coerceAtLeast(0)
+        val xBase = (frameWidth - w) / 2
+        val xBias = (frameWidth.toDouble() * horizontalBiasFracOfWidth).toInt()
+        val x = (xBase + xBias).coerceIn(0, kotlin.math.max(0, frameWidth - w))
         val yBase = (frameHeight - h) / 2
         val yBias = (frameHeight.toDouble() * verticalBiasFracOfHeight).toInt()
         val y = (yBase + yBias).coerceIn(0, kotlin.math.max(0, frameHeight - h))

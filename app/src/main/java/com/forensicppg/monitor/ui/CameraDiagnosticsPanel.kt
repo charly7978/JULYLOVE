@@ -27,6 +27,7 @@ fun CameraDiagnosticsPanel(
     config: CameraSessionConfig?,
     fpsActual: Double,
     diagnostics: DiagnosticsSnapshot?,
+    roiPresetSummary: String? = null,
     modifier: Modifier = Modifier
 ) {
     Box(
@@ -67,6 +68,9 @@ fun CameraDiagnosticsPanel(
                     "ISP req",
                     (config?.ispAcquisitionSummary)?.takeIf { it.isNotBlank() } ?: "—"
                 )
+            }
+            roiPresetSummary?.takeIf { it.isNotBlank() }?.let { preset ->
+                Row { Labeled("ROI / LED preset", preset.take(116)) }
             }
 
             if (diagnostics != null) {

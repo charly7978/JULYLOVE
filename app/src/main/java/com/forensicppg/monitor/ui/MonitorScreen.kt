@@ -1,6 +1,7 @@
 package com.forensicppg.monitor.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,6 +19,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -35,6 +38,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.forensicppg.monitor.domain.PpgValidityState
 import com.forensicppg.monitor.domain.VitalReading
+import com.forensicppg.monitor.ppg.RoiGeometryPreset
 
 @Composable
 fun MonitorScreen(
@@ -50,6 +54,8 @@ fun MonitorScreen(
     val calibration by viewModel.calibrationProfile.collectAsState()
     val audioOn by viewModel.feedbackAudioOn.collectAsState()
     val vibOn by viewModel.feedbackVibrationOn.collectAsState()
+
+    val roiGeometryPreset by viewModel.roiGeometryPreset.collectAsState()
 
     var showDiagnostics by remember { mutableStateOf(false) }
     var showFingerPlacementGuide by remember { mutableStateOf(true) }
@@ -112,6 +118,13 @@ fun MonitorScreen(
                 if (running) {
                     FingerContactCoach(reading, modifier = Modifier.fillMaxWidth())
                 }
+                RoiGeometryPresetSelectorRow(
+                    canPersist = cameraCfg != null,
+                    running = running,
+                    selected = roiGeometryPreset,
+                    onSelect = viewModel::setRoiGeometryPreset,
+                    modifier = Modifier.fillMaxWidth()
+                )
                 SignalQualityPanel(reading, modifier = Modifier.fillMaxWidth())
             }
             Spacer(Modifier.fillMaxWidth(0.01f))
@@ -133,6 +146,7 @@ fun MonitorScreen(
                     config = cameraCfg,
                     fpsActual = fps,
                     diagnostics = if (showDiagnostics) reading.diagnostics else null,
+                    roiPresetSummary = cameraCfg?.let { roiGeometryPreset.labelEs },
                     modifier = Modifier.fillMaxWidth()
                 )
             }
@@ -358,5 +372,74 @@ private fun ControlBar(
             shape = RoundedCornerShape(6.dp),
             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4488CC))
         ) { Text("EXPORTAR", color = Color.White, fontFamily = FontFamily.Monospace) }
+    }
+}
+
+@Composable
+private fun RoiGeometryPresetSelectorRow(
+    canPersist: Boolean,
+    running: Boolean,
+    selected: RoiGeometryPreset,
+    onSelect: (RoiGeometryPreset) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier
+            .background(Color(0xFF081018), RoundedCornerShape(6.dp))
+            .padding(horizontal = 8.dp, vertical = 6.dp)
+    ) {
+        Text(
+            "Preset ROI vs posición flash / LED lateral",
+            color = Color(0xFFB8E0CC),
+            fontFamily = FontFamily.Monospace,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Bold
+        )
+        Spacer(Modifier.height(6.dp))
+        Row(
+            modifier = Modifier.horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            RoiGeometryPreset.entries.forEach { preset ->
+                FilterChip(
+                    selected = preset == selected,
+                    onClick = {
+                        if (canPersist) onSelect(preset)
+                    },
+                    enabled = canPersist,
+                    label = {
+                        Text(
+                            preset.chipLabelEs,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 10.sp,
+                            maxLines = 1
+                        )
+                    },
+                    colors = FilterChipDefaults.filterChipColors(
+                        containerColor = Color(0xFF1A2830),
+                        labelColor = Color(0xFFCCDDEE),
+                        selectedContainerColor = Color(0xFF1B5E4A),
+                        selectedLabelColor = Color(0xFFEEFFFA),
+                        disabledContainerColor = Color(0xFF151A1E),
+                        disabledLabelColor = Color(0xFF556677)
+                    )
+                )
+            }
+        }
+        Spacer(Modifier.height(6.dp))
+        Text(
+            when {
+                !canPersist ->
+                    "Iniciá una medición una vez para recordar esta cámara; luego cambiás preset cuando quieras."
+                running ->
+                    "Activo · ${selected.labelEs} · aplica fotograma a fotograma."
+                else ->
+                    "Preset guardado por equipo/cámara. El próximo INICIAR cargará este ajuste."
+            },
+            color = Color(0x88CCEECC),
+            fontFamily = FontFamily.Monospace,
+            fontSize = 9.sp,
+            maxLines = 5
+        )
     }
 }
