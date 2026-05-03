@@ -3,6 +3,7 @@ import type { MonitorApi } from '../hooks/useMonitor'
 import { MEASUREMENT_STATE_LABEL, stateAllowsMetrics } from '../ppg/types'
 import { SignalQualityIndex, SQI_BAND_LABEL } from '../ppg/sqi'
 import { CalibrationOverlay } from './CalibrationOverlay'
+import { FingerPlacementGuide } from './FingerPlacementGuide'
 import { PpgWaveform } from './PpgWaveform'
 
 /**
@@ -14,6 +15,7 @@ import { PpgWaveform } from './PpgWaveform'
  */
 export function MonitorScreen({ monitor }: { monitor: MonitorApi }) {
   const [showCalibration, setShowCalibration] = useState(false)
+  const [showGuide, setShowGuide] = useState(true)
   const r = monitor.reading
   const measuring = stateAllowsMetrics(r.state)
   const bpm = r.bpm.toFixed(0)
@@ -186,7 +188,10 @@ export function MonitorScreen({ monitor }: { monitor: MonitorApi }) {
       <div style={controlBar}>
         <button
           style={btnStyle(monitor.running ? '#FF3344' : '#22FFAA')}
-          onClick={() => (monitor.running ? void monitor.stop() : void monitor.start())}
+          onClick={() => {
+            if (monitor.running) void monitor.stop()
+            else setShowGuide(true)
+          }}
         >
           {monitor.running ? 'DETENER' : 'INICIAR'}
         </button>
@@ -204,6 +209,15 @@ export function MonitorScreen({ monitor }: { monitor: MonitorApi }) {
 
       {showCalibration ? (
         <CalibrationOverlay monitor={monitor} onClose={() => setShowCalibration(false)} />
+      ) : null}
+
+      {showGuide ? (
+        <FingerPlacementGuide
+          onContinue={() => {
+            setShowGuide(false)
+            if (!monitor.running) void monitor.start()
+          }}
+        />
       ) : null}
     </div>
   )
