@@ -21,7 +21,7 @@ class PpgSignalQuality {
         val snr01 = ((ci.spectralSnrDb + 21.5) / 41.5).coerceIn(0.0, 1.0)
         val heart01 = ci.spectralHeartFrac.coerceIn(0.0, 1.0)
         val motionBounded = abs(ci.motionCombined01).coerceIn(0.0, 1.2)
-        val clipSum = ci.clippingHigh * 5.4 + ci.clippingLow * 3.6 + motionBounded * 2.10
+        val clipSum = ci.clippingHigh * 5.4 + ci.clippingLow * 3.6 + motionBounded * 1.88
         val clipPenalty = clipSum.coerceIn(0.0, 7.0) / 7.0
         val rr01 = when {
             ci.rrCv != null && ci.rrCount >= 6 ->

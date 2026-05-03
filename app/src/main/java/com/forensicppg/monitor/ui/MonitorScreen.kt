@@ -109,6 +109,9 @@ fun MonitorScreen(
                         }
                     }
                 }
+                if (running) {
+                    FingerContactCoach(reading, modifier = Modifier.fillMaxWidth())
+                }
                 SignalQualityPanel(reading, modifier = Modifier.fillMaxWidth())
             }
             Spacer(Modifier.fillMaxWidth(0.01f))
@@ -275,7 +278,7 @@ private fun TopStatusBar(reading: VitalReading, calibrated: Boolean, running: Bo
 private fun VitalsColumn(reading: VitalReading, fps: Double) {
     val bpmOk =
         reading.bpmSmoothed != null &&
-            reading.bpmConfidence >= 0.35 &&
+            reading.bpmConfidence >= 0.28 &&
             reading.validityState.ordinal >= PpgValidityState.PPG_CANDIDATE.ordinal
     val bpmStr = reading.bpmSmoothed?.takeIf { bpmOk }?.let { "%.0f".format(it) } ?: "--"
     val spo2Show = reading.spo2 != null && reading.spo2Confidence >= 0.2

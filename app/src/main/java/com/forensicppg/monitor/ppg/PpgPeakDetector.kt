@@ -63,19 +63,28 @@ class PpgPeakDetector(
         val spike = abs(filteredWave - prevFiltered)
         prevFiltered = filteredWave
 
-        if (validityState.ordinal < PpgValidityState.PPG_CANDIDATE.ordinal ||
-            validityState == PpgValidityState.NO_PHYSIOLOGICAL_SIGNAL
+        val validityOk =
+            validityState.ordinal >= PpgValidityState.PPG_CANDIDATE.ordinal ||
+                (
+                    validityState == PpgValidityState.RAW_OPTICAL_ONLY &&
+                        sqiComposite >= 0.48 &&
+                        opticalMotionSmoothed < 0.44
+                    )
+        if (
+            validityState == PpgValidityState.NO_PHYSIOLOGICAL_SIGNAL ||
+            !validityOk
         ) {
             return null
         }
-        if (sqiComposite < 0.38) {
+        val sqiPeakGate = if (opticalMotionSmoothed < 0.38) 0.31 else 0.35
+        if (sqiComposite < sqiPeakGate) {
             return null
         }
-        if (opticalMotionSmoothed > 0.58 && spike > 0.16) {
+        if (opticalMotionSmoothed > 0.70 && spike > 0.18) {
             return null
         }
         val lastTs = lastEmittedNs
-        if (buf.size < 80) return null
+        if (buf.size < 68) return null
 
         /** Vecindad proporcional (~150 ms cada lado ) */
         val neigh = max(6, ceil(0.148 * sr).toInt())
@@ -97,9 +106,9 @@ class PpgPeakDetector(
             val base = kotlin.math.min(leftMin, rightMin)
             val prom = cen.y - base
             val mad = residualMadAround(list, i)
-            val gateProm = max(2.42 * mad, abs(cen.y) * 0.071)
+            val gateProm = max(2.12 * mad, abs(cen.y) * 0.062)
 
-            if (prom <= gateProm || prom < abs(cen.y) * 0.062) continue
+            if (prom <= gateProm || prom < abs(cen.y) * 0.054) continue
 
             if (lastTs != null && cen.tsNs - lastTs < minPeakGapNs) continue
 

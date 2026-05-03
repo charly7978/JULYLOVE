@@ -46,7 +46,7 @@ class MotionArtifactEstimator(
         val mean = sum / filled
         val variance = (sumSq / filled) - mean * mean
         val std = kotlin.math.sqrt(variance.coerceAtLeast(0.0))
-        val stdScore = (std / 2.5).coerceIn(0.0, 1.0)
-        return (0.75 * stdScore + 0.35 * lastSpike).coerceIn(0.0, 1.0)
+        val stdScore = (std / 3.15).coerceIn(0.0, 1.0)
+        return (0.64 * stdScore + 0.30 * lastSpike).coerceIn(0.0, 1.0)
     }
 }

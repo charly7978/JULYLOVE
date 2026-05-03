@@ -12,10 +12,10 @@ object PpgPhysiologyClassifier {
         greenAcDcBandEstimate: Double
     ): PpgValidityState {
         val heartHz = spectral.dominantFreqHz
-        val bandOk = spectral.heartBandFraction >= 0.075 && heartHz in 0.64..4.12 &&
-                spectral.autocorrPulseStrength >= 0.055
+        val bandOk = spectral.heartBandFraction >= 0.058 && heartHz in 0.52..4.38 &&
+                spectral.autocorrPulseStrength >= 0.047
 
-        if (!bandOk || sqiComposite < 0.10) {
+        if (!bandOk || sqiComposite < 0.085) {
             if (roiRedDominance > 2.85 && greenAcDcBandEstimate < 0.032 && clippingHighRatio < 0.13) {
                 return PpgValidityState.NO_PHYSIOLOGICAL_SIGNAL
             }
@@ -23,27 +23,27 @@ object PpgPhysiologyClassifier {
         }
 
         var step = when {
-            sqiComposite < 0.28 ->
-                if (spectral.autocorrPulseStrength < 0.066) PpgValidityState.NO_PHYSIOLOGICAL_SIGNAL
+            sqiComposite < 0.24 ->
+                if (spectral.autocorrPulseStrength < 0.058) PpgValidityState.NO_PHYSIOLOGICAL_SIGNAL
                 else PpgValidityState.RAW_OPTICAL_ONLY
-            spectral.snrHeartDbEstimate < -13.9 && spectral.autocorrPulseStrength < 0.078 ->
+            spectral.snrHeartDbEstimate < -15.9 && spectral.autocorrPulseStrength < 0.066 ->
                 PpgValidityState.NO_PHYSIOLOGICAL_SIGNAL
-            clippingHighRatio > 0.36 || clippingHighRatio > 0.10 && spectral.coherenceRg < 0.11 ->
+            clippingHighRatio > 0.40 || clippingHighRatio > 0.12 && spectral.coherenceRg < 0.085 ->
                 PpgValidityState.RAW_OPTICAL_ONLY
-            sqiComposite >= 0.43 && spectral.coherenceRg > 0.12 && spectral.autocorrPulseStrength >= 0.078 ->
+            sqiComposite >= 0.37 && spectral.coherenceRg > 0.09 && spectral.autocorrPulseStrength >= 0.064 ->
                 PpgValidityState.PPG_CANDIDATE
             else -> PpgValidityState.RAW_OPTICAL_ONLY
         }
 
-        if ((step.ordinal >= PpgValidityState.PPG_CANDIDATE.ordinal || opticalMotionSmoothed < 0.38) &&
-            sqiComposite >= 0.52 && clippingHighRatio < 0.22 && spectral.snrHeartDbEstimate >= -13.9
+        if ((step.ordinal >= PpgValidityState.PPG_CANDIDATE.ordinal || opticalMotionSmoothed < 0.44) &&
+            sqiComposite >= 0.45 && clippingHighRatio < 0.25 && spectral.snrHeartDbEstimate >= -15.2
         ) {
             step = PpgValidityState.PPG_VALID
         }
 
         if (step.ordinal >= PpgValidityState.PPG_VALID.ordinal &&
-            sqiComposite >= 0.62 && spectral.snrHeartDbEstimate >= -11.9 &&
-            opticalMotionSmoothed < 0.62 && clippingHighRatio < 0.16
+            sqiComposite >= 0.56 && spectral.snrHeartDbEstimate >= -12.3 &&
+            opticalMotionSmoothed < 0.70 && clippingHighRatio < 0.185
         ) {
             step = PpgValidityState.BIOMETRIC_VALID
         }

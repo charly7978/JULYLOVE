@@ -135,7 +135,7 @@ class PpgPipeline(
         /** SpO₂ clínica sólo con evidencia y calibración presente según clasificador y estimador. */
         val allowsClinicalOximetry =
             physiology.ordinal >= PpgValidityState.PPG_VALID.ordinal &&
-                calibration != null && sqiValue >= 0.52
+                calibration != null && sqiValue >= 0.48
 
         val piUse = (ppg.roiStats.perfusionIndexGreenPct / 100.0).coerceIn(0.0, 10.5)
 
@@ -155,7 +155,7 @@ class PpgPipeline(
         var flags = ReadingValidity.OK
         if (ppg.clippingHighRatio > 0.18) flags = flags or ReadingValidity.CLIPPING_HIGH
         if (ppg.lowLightSuspected || ppg.clippingLowRatio > 0.22) flags = flags or ReadingValidity.CLIPPING_LOW
-        if (fusedMotion > 0.70) flags = flags or ReadingValidity.MOTION_HIGH
+        if (fusedMotion > 0.78) flags = flags or ReadingValidity.MOTION_HIGH
         if (ppg.lowLightSuspected) flags = flags or ReadingValidity.NO_FINGER /* reutilizada como cue de baja luminosidad táctil */
         if (!enoughRrCount || bpmMedian == null) flags = flags or ReadingValidity.NOT_ENOUGH_BEATS
         if (calibration == null && physiology.ordinal >= PpgValidityState.PPG_VALID.ordinal) {

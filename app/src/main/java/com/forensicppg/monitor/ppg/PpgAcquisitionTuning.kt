@@ -30,18 +30,18 @@ object PpgAcquisitionTuning {
     /** Ventana rápida de medias ROI por canal (frames). ≈200/30 Hz ≈6.7 s histórico local. */
     const val CHANNEL_ROLLING_CAPACITY = 200
 
-    /** EMA coeficiente para movimiento óptico intra-ROI [0..1]. */
-    const val MOTION_EMA_ALPHA = 0.92
+    /** EMA coeficiente para movimiento óptico intra-ROI [0..1]. Más bajo ⇒ feedback más rápido (mejor UX al colocar el dedo). */
+    const val MOTION_EMA_ALPHA = 0.88
 
     /** Umbral inferior de movimiento estable para contraer ROI ligeramente. */
-    const val MOTION_STABLE_GATE = 0.038
+    const val MOTION_STABLE_GATE = 0.042
 
     /** Frames continuos estables antes de usar ROI más compacto (menos bordes). */
-    const val MOTION_STABLE_FRAMES_NEED = 40
+    const val MOTION_STABLE_FRAMES_NEED = 52
 
     /** Fracciones adaptativas del ROI (centro frame), acotadas. */
-    const val ROI_FRACTION_TIGHT = 0.48
-    const val ROI_FRACTION_LOOSE = 0.62
+    const val ROI_FRACTION_TIGHT = 0.50
+    const val ROI_FRACTION_LOOSE = 0.655
 
     /** Coeficiente empírico verde pulsátil → índice tipo perfusion (consistencia temporal). */
     const val GREEN_PERFUSION_SCALE = 120.0

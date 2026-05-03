@@ -30,9 +30,8 @@ class PpgSignalProcessor(
     private var filled = false
 
     private val detrend = Detrender(windowSamples = (sr * 4.5).toInt().coerceIn(48, 620))
-    private val bp = BandpassFilter(sr, lowHz = 0.5, highHz = 4.0)
+    private val bp = BandpassFilter(sr, lowHz = 0.42, highHz = 4.38)
     private val smoothDeque = ArrayDeque<Double>(16)
-    private var fftTick = 0
 
     private var lastSpectrum = SpectrumSummary(
         dominantFreqHz = 0.0,
@@ -61,7 +60,7 @@ class PpgSignalProcessor(
     fun reset() {
         head = 0; filled = false
         detrend.reset(); bp.reset()
-        smoothDeque.clear(); fftTick = 0
+        smoothDeque.clear()
         rawGreen.fill(0.0); rawRed.fill(0.0)
         lastSpectrum = SpectrumSummary(0.0, 0.0, -40.0, 0.0, 0.0, 0.5)
     }
@@ -77,14 +76,13 @@ class PpgSignalProcessor(
 
         val detrended = detrend.process(sample.rawGreen)
         val filt = bp.process(detrended)
-        smoothDeque.addLast(filt); while (smoothDeque.size > 5) smoothDeque.removeFirst()
+        smoothDeque.addLast(filt); while (smoothDeque.size > 7) smoothDeque.removeFirst()
 
         val segDc = chronological(rawGreen, min(560, effectiveSamples()))
         val dcCv = coefficientOfVariation(segDc)
         val dcStab = (1.0 - min(12.0, dcCv)).coerceIn(0.0, 1.0)
 
-        fftTick++
-        if (effectiveSamples() >= FFT_SIZE && fftTick % 2 == 0) {
+        if (effectiveSamples() >= FFT_SIZE) {
             lastSpectrum = computeSpectrum(dcStabilityHold = dcStab)
         } else {
             lastSpectrum = lastSpectrum.copy(dcStability = dcStab)
