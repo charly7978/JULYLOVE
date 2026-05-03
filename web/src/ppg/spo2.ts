@@ -36,25 +36,29 @@ export interface Spo2Result {
 }
 
 /**
- * Estimador SpO₂ avanzado:
+ * Estimador SpO₂ por ratio-of-ratios (RoR) sobre cámara con flash blanco.
  *
- *  1. Cada canal (R, G, B) tiene su propio bandpass 0.5-4 Hz y su propio
- *     seguidor de DC (EMA lento). De ahí obtenemos AC/DC "limpio" por canal.
- *  2. Se computa la ratio R = (AC_red/DC_red)/(AC_blue/DC_blue) por muestra,
- *     pero lo que se reporta es una MEDIANA sobre una ventana temporal de
- *     4-6 s: resistente a outliers por movimiento.
- *  3. Se aplica una curva empírica por tramos basada en literatura:
+ * Modelo físico:
+ *   bajo iluminación blanca, la absorción depende del coeficiente molar
+ *   ε(λ) de HbO₂ y Hb. Para 540 nm (verde) ε es alto y prácticamente
+ *   isobestico, mientras que en 660 nm (rojo) ε de Hb es alto pero el
+ *   de HbO₂ es bajo. La ratio canónica para fuentes blancas (Scully
+ *   2012, Lamonaca 2017, Ding 2018, Wieringa 2005) es:
  *
- *        R ≤ 0.4  → 100 %
- *        R = 1.0  → 94 %
- *        R = 2.0  → 70 %
- *     interpolada polinomialmente: SpO₂ = 110 − 25 R (tramo 0.4..2.0)
- *     y suavizada con calibración individual cuando exista.
- *  4. Con calibración se reemplazan (A, B) por los coeficientes ajustados
- *     al dispositivo del usuario vía mínimos cuadrados.
- *  5. Se aplica un filtro EMA de salida (τ ≈ 3 s) + gate de calidad
- *     (perfusión, clipping, motion, SQI). La confidence refleja qué tan
- *     lejos está del rango calibrado.
+ *        R = (AC_red / DC_red) / (AC_green / DC_green)
+ *
+ *   El AC se calcula peak-to-peak sobre una ventana de 4–6 s del canal
+ *   ya filtrado en banda 0.5–4 Hz. El DC se sigue con EMA τ≈3 s del
+ *   canal crudo.
+ *
+ * Calibración:
+ *   - Sin perfil: SpO₂ = A − B·R con (A, B) = (110, 25), reportada con
+ *     reason="provisional_no_clinico" y confianza ≤ 0.55 (no clínica).
+ *   - Con perfil ajustado (≥3 puntos contra oxímetro de referencia,
+ *     mínimos cuadrados ordinarios) se reemplazan A y B.
+ *
+ * Suavizado de salida: EMA τ ≈ 3 s. Gates: perfusión, clipping alto,
+ * clipping bajo, movimiento.
  */
 export class Spo2Estimator {
   private readonly fs: number
@@ -148,20 +152,21 @@ export class Spo2Estimator {
       return this.empty('ventana_incompleta')
     }
     const rAcPp = peakToPeak(this.acWinR, this.acFilled)
-    const bAcPp = peakToPeak(this.acWinB, this.acFilled)
     const gAcPp = peakToPeak(this.acWinG, this.acFilled)
+    const bAcPp = peakToPeak(this.acWinB, this.acFilled)
     const rRatio = this.dcR > 1 ? rAcPp / this.dcR : 0
-    const bRatio = this.dcB > 1 ? bAcPp / this.dcB : 0
     const gRatio = this.dcG > 1 ? gAcPp / this.dcG : 0
-    if (rRatio <= 0 || bRatio <= 0) return this.empty('ac_dc_insuficiente')
-    const ratio = rRatio / bRatio
+    const bRatio = this.dcB > 1 ? bAcPp / this.dcB : 0
+    if (rRatio <= 0 || gRatio <= 0) return this.empty('ac_dc_insuficiente')
+    // Ratio canónico R/G para flash blanco: Hb absorbe verde mucho más
+    // que rojo (ε_Hb 540nm ≫ ε_Hb 660nm) y HbO2 absorbe poco rojo.
+    const ratio = rRatio / gRatio
     this.ratioWin.push(ratio)
     while (this.ratioWin.length > 90) this.ratioWin.shift()
     const rMedian = median(this.ratioWin)
     if (!(rMedian >= 0.25 && rMedian <= 3.5)) return this.empty('r_fuera_rango')
 
-    // Gates de calidad. Relajamos para que SpO2 se calcule siempre que el
-    // pipeline haya declarado medición.
+    // Gates de calidad.
     if (perfusionIndex < 0.2) return this.empty('perfusion_baja')
     if (motionScore > 0.5) return this.empty('movimiento')
     if (clipHighRatio > 0.3) return this.empty('clipping')
@@ -184,8 +189,8 @@ export class Spo2Estimator {
       confidence,
       ratioOfRatios: rMedian,
       redAcDc: rRatio,
-      blueAcDc: bRatio,
       greenAcDc: gRatio,
+      blueAcDc: bRatio,
       reason: calibration ? 'ok' : 'provisional_no_clinico'
     }
   }

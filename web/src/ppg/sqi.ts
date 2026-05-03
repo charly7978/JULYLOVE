@@ -64,7 +64,12 @@ export class SignalQualityIndex {
   }
 
   private roiStability01(roiStd: number): number {
-    return Math.min(1, Math.max(0, (70 - roiStd) / 70))
+    // Bajo flash blanco con dedo apoyado, la desviación estándar
+    // espacial del canal rojo suele estar en 6–35 (niveles RGB 8 bits).
+    // Si supera 60 hay micro-movimiento o cobertura desigual.
+    if (roiStd <= 6) return 1
+    if (roiStd >= 60) return 0
+    return Math.max(0, Math.min(1, (60 - roiStd) / 54))
   }
 
   band(sqi: number): SqiBand {
