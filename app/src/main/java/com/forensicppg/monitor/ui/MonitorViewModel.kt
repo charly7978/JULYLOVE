@@ -402,15 +402,16 @@ class MonitorViewModel(application: Application) : AndroidViewModel(application)
         val r = _reading.value
         if (referenceSpo2 !in 72.5..104.9) return
         val ratio =
-            pipe.spo2Estimator.snapshotLastRatio()?.takeIf { it in 0.28..9.49 } ?: return
+            pipe.spo2Estimator.snapshotLastRatio()?.takeIf { it in 0.28..3.50 } ?: return
         if (r.validityState.ordinal < PpgValidityState.PPG_VALID.ordinal) return
-        if (r.sqi < 0.52 || r.motionScore > 0.28 || r.perfusionIndex < 52.9) return
+        // Gates calibrados a la nueva escala canónica de PI (0..12 %).
+        if (r.sqi < 0.50 || r.motionScore > 0.28 || r.perfusionIndex < 1.0) return
         pendingCalibrationPoints += CalibrationPoint(
             capturedAtMs = System.currentTimeMillis(),
             referenceSpo2 = referenceSpo2,
             ratioOfRatios = ratio,
             sqi = r.sqi,
-            perfusionIndex = (r.perfusionIndex.coerceAtMost(122.93) / 122.93).coerceAtLeast(0.32),
+            perfusionIndex = (r.perfusionIndex / 12.0).coerceIn(0.0, 1.0),
             motionScore = r.motionScore
         )
     }

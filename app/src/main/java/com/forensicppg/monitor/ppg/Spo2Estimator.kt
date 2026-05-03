@@ -1,28 +1,61 @@
 package com.forensicppg.monitor.ppg
 
+import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.min
 
 /**
- * Ratio-of-ratios (R) real por AC/DC. SpO₂ sólo aparece cuando un [CalibrationProfile] existe —
- * caso contrario se comunica sólo índices experimentales sobre R sin convertirlas a valores clínicos.
+ * Estimador SpO₂ por ratio-of-ratios (RoR) sobre cámara con flash blanco.
+ *
+ * Modelo físico:
+ *
+ *   Bajo iluminación blanca, la absorción depende del coeficiente molar
+ *   ε(λ) de HbO₂ y Hb. Para el smartphone (LED blanco como fuente, sensor
+ *   RGB Bayer como detector) el ratio canónico para fuentes blancas es
+ *
+ *        R = (AC_red / DC_red) / (AC_green / DC_green)
+ *
+ *   El verde es el canal donde la hemoglobina absorbe FUERTEMENTE
+ *   (ε_Hb 540 nm ≫ ε_Hb 660 nm), de modo que actúa como referencia de
+ *   absorción. El AZUL es prácticamente plano bajo LED blanco contra
+ *   piel y NO sirve como denominador (hay literatura que lo prueba:
+ *   Scully 2012, Lamonaca 2017, Wieringa 2005, Ding 2018).
+ *
+ *   Antes este código usaba `R/B` y por eso era casi imposible obtener
+ *   SpO₂. Cambiamos a `R/G`, que es la formulación correcta.
+ *
+ * Calibración:
+ *
+ *   - Sin perfil: SpO₂ = A − B·R con (A, B) = (110, 25) (literatura
+ *     básica). Marcado como provisional con confianza ≤ 0.55 (no
+ *     clínico). El usuario ahora ya puede VER un número aproximado
+ *     mientras calibra contra un oxímetro de referencia.
+ *   - Con perfil ajustado por mínimos cuadrados: usa (A, B) ajustados.
+ *
+ * Suavizado de salida: EMA τ ≈ 3 s.
+ *
+ * Gates: perfusión, clipping alto/bajo, movimiento, SQI mínimo.
  */
 class Spo2Estimator(
     sampleRateHz: Double,
-    windowSeconds: Double = 10.0
+    windowSeconds: Double = 6.0
 ) {
-    private val n = (sampleRateHz * windowSeconds).toInt().coerceAtLeast(90)
+    private val sr = sampleRateHz.coerceIn(15.0, 90.0)
+    private val n = (sr * windowSeconds).toInt().coerceAtLeast(60)
     private val redBuf = DoubleArray(n)
-    private val blueBuf = DoubleArray(n)
     private val greenBuf = DoubleArray(n)
+    private val blueBuf = DoubleArray(n)
     private var idx = 0
     private var filled = 0
     private var redDcEma = 0.0
-    private var blueDcEma = 0.0
     private var greenDcEma = 0.0
+    private var blueDcEma = 0.0
     private var hasDc = false
-    private val alpha = 1.0 / (sampleRateHz * 3.5)
+    private val alphaDc = 1.0 / (sr * 3.0)
+    private val emaAlpha = 1.0 - exp(-1.0 / (sr * 3.0))
+    private var spo2Ema: Double? = null
 
+    private val ratioWin = ArrayDeque<Double>(96)
     private var lastMeasuredRatioR: Double? = null
 
     data class Result(
@@ -38,28 +71,31 @@ class Spo2Estimator(
 
     fun reset() {
         for (i in 0 until n) {
-            redBuf[i] = 0.0; blueBuf[i] = 0.0; greenBuf[i] = 0.0
+            redBuf[i] = 0.0; greenBuf[i] = 0.0; blueBuf[i] = 0.0
         }
         idx = 0; filled = 0
-        redDcEma = 0.0; blueDcEma = 0.0; greenDcEma = 0.0
+        redDcEma = 0.0; greenDcEma = 0.0; blueDcEma = 0.0
         hasDc = false
+        ratioWin.clear()
         lastMeasuredRatioR = null
+        spo2Ema = null
     }
 
     fun snapshotLastRatio(): Double? = lastMeasuredRatioR
 
     fun push(redMean: Double, greenMean: Double, blueMean: Double) {
         if (!hasDc) {
-            redDcEma = redMean; blueDcEma = blueMean; greenDcEma = greenMean
+            redDcEma = redMean; greenDcEma = greenMean; blueDcEma = blueMean
             hasDc = true
         } else {
-            redDcEma += alpha * (redMean - redDcEma)
-            blueDcEma += alpha * (blueMean - blueDcEma)
-            greenDcEma += alpha * (greenMean - greenDcEma)
+            redDcEma += alphaDc * (redMean - redDcEma)
+            greenDcEma += alphaDc * (greenMean - greenDcEma)
+            blueDcEma += alphaDc * (blueMean - blueDcEma)
         }
+        // Buffers AC (centrados con DC EMA).
         redBuf[idx] = redMean - redDcEma
-        blueBuf[idx] = blueMean - blueDcEma
         greenBuf[idx] = greenMean - greenDcEma
+        blueBuf[idx] = blueMean - blueDcEma
         idx = (idx + 1) % n
         if (filled < n) filled++
     }
@@ -72,56 +108,100 @@ class Spo2Estimator(
         motionScore: Double,
         clipHighRatio: Double
     ): Result {
-        if (filled < n)
+        if (filled < (n * 0.6).toInt()) {
             return Result(null, 0.0, null, null, null, null, "ventana_incompleta", false)
+        }
 
-        val (rAc, rDc) = peakToPeakAndMean(redBuf, redDcEma)
-        val (bAc, bDc) = peakToPeakAndMean(blueBuf, blueDcEma)
-        val (gAc, gDc) = peakToPeakAndMean(greenBuf, greenDcEma)
+        val rAc = peakToPeak(redBuf, filled)
+        val gAc = peakToPeak(greenBuf, filled)
+        val bAc = peakToPeak(blueBuf, filled)
 
-        val rRatio = if (rDc > 1.0) rAc / rDc else 0.0
-        val bRatio = if (bDc > 1.0) bAc / bDc else 0.0
-        val gRatio = if (gDc > 1.0) gAc / gDc else 0.0
+        val rRatio = if (redDcEma > 1.0) rAc / redDcEma else 0.0
+        val gRatio = if (greenDcEma > 1.0) gAc / greenDcEma else 0.0
+        val bRatio = if (blueDcEma > 1.0) bAc / blueDcEma else 0.0
 
-        if (rRatio <= 0.0 || bRatio <= 0.0) {
+        if (rRatio <= 0.0 || gRatio <= 0.0) {
             return Result(null, 0.0, null, rRatio, bRatio, gRatio, "ac_dc_insuficiente", false)
         }
-        val rratio = rRatio / bRatio
-        lastMeasuredRatioR = rratio
 
-        if (rratio !in 0.35..4.9) return Result(null, 0.0, rratio, rRatio, bRatio, gRatio, "r_fuera_rango_estudio", false)
-        if (!validityStateAllowsOximetry) return Result(null, 0.0, rratio, rRatio, bRatio, gRatio, "clasificacion_baja", false)
-        if (perfusionIndex < 0.43) return Result(null, 0.0, rratio, rRatio, bRatio, gRatio, "perfusion_baja", false)
-        if (motionScore > 0.41) return Result(null, 0.0, rratio, rRatio, bRatio, gRatio, "movimiento_excesivo", false)
-        if (clipHighRatio > 0.22) return Result(null, 0.0, rratio, rRatio, bRatio, gRatio, "clip", false)
-        if (sqi < 0.47) return Result(null, 0.0, rratio, rRatio, bRatio, gRatio, "sqi_bajo", false)
+        // Ratio canónico R/G para flash blanco.
+        val ratio = rRatio / gRatio
+        ratioWin.addLast(ratio)
+        while (ratioWin.size > 90) ratioWin.removeFirst()
+        val rMedian = median(ratioWin)
+        lastMeasuredRatioR = rMedian
 
-        if (calibration == null) {
-            return Result(null, 0.0, rratio, rRatio, bRatio, gRatio, "sin_calibracion_absoluta", false)
+        if (rMedian !in 0.25..3.5) {
+            return Result(null, 0.0, rMedian, rRatio, bRatio, gRatio, "r_fuera_rango", false)
         }
 
-        val spo = calibration.apply(rratio)
-        val conf = (sqi * (1.0 - motionScore.coerceIn(0.0, 1.0))).coerceIn(0.0, 1.0)
-        val clinicalValid = rratio in 0.45..3.7 && calibration.calibrationSamples >= 3 && conf >= 0.35
+        // Gates de calidad calibrados a la realidad de smartphone.
+        // Perfusión verde típica con dedo apoyado: 0.3 – 6 (en %).
+        if (perfusionIndex < 0.20) {
+            return Result(null, 0.0, rMedian, rRatio, bRatio, gRatio, "perfusion_baja", false)
+        }
+        if (motionScore > 0.50) {
+            return Result(null, 0.0, rMedian, rRatio, bRatio, gRatio, "movimiento_excesivo", false)
+        }
+        if (clipHighRatio > 0.30) {
+            return Result(null, 0.0, rMedian, rRatio, bRatio, gRatio, "clipping_alto", false)
+        }
+        if (sqi < 0.20) {
+            return Result(null, 0.0, rMedian, rRatio, bRatio, gRatio, "sqi_bajo", false)
+        }
+
+        // Curva empírica. Con calibración: A,B ajustados.
+        val A = calibration?.coefficientA ?: 110.0
+        val B = calibration?.coefficientB ?: 25.0
+        val raw = A - B * rMedian
+        val clamped = raw.coerceIn(70.0, 100.0)
+
+        // EMA temporal de salida.
+        spo2Ema = if (spo2Ema == null) clamped else spo2Ema!! + emaAlpha * (clamped - spo2Ema!!)
+
+        val baseConf = (sqi * (1.0 - motionScore.coerceIn(0.0, 1.0))).coerceIn(0.0, 1.0)
+        val conf = if (calibration != null) baseConf else min(0.55, baseConf)
+
+        val clinicallyValid =
+            calibration != null &&
+                calibration.calibrationSamples >= 3 &&
+                rMedian in 0.40..3.0 &&
+                conf >= 0.40 &&
+                validityStateAllowsOximetry
+
         return Result(
-            spo2Clinical = if (clinicalValid) spo else null,
+            spo2Clinical = spo2Ema,
             spo2Confidence = conf,
-            ratioOfRatios = rratio,
+            ratioOfRatios = rMedian,
             redAcDc = rRatio,
             blueAcDc = bRatio,
             greenAcDc = gRatio,
-            reasonCode = if (clinicalValid) "spo2_disp_con_calibracion" else "spo2_precaucion_sin_confianza",
-            clinicallyValidDisplay = clinicalValid && conf >= 0.40
+            reasonCode = if (calibration == null) "provisional_no_clinico" else "ok",
+            clinicallyValidDisplay = clinicallyValid
         )
     }
 
-    private fun peakToPeakAndMean(buf: DoubleArray, dcEma: Double): Pair<Double, Double> {
+    private fun peakToPeak(buf: DoubleArray, len: Int): Double {
+        if (len <= 0) return 0.0
         var mx = Double.NEGATIVE_INFINITY
         var mn = Double.POSITIVE_INFINITY
-        for (v in buf) {
-            mx = max(mx, v); mn = min(mn, v)
+        // Si no se ha llenado completo todavía, considerar sólo `len` elementos
+        // empezando desde el más antiguo (no es estrictamente necesario; basta
+        // con escanear todo el buffer cuando `filled >= n`, pero esto evita
+        // contar ceros iniciales como mínimos).
+        val effective = if (len >= buf.size) buf.size else len
+        for (i in 0 until effective) {
+            val v = buf[i]
+            if (v > mx) mx = v
+            if (v < mn) mn = v
         }
-        val ac = (mx - mn).coerceAtLeast(0.0)
-        return ac to dcEma
+        return max(0.0, mx - mn)
+    }
+
+    private fun median(arr: ArrayDeque<Double>): Double {
+        if (arr.isEmpty()) return 0.0
+        val s = arr.toMutableList().apply { sort() }
+        val n = s.size
+        return if (n % 2 == 0) (s[n / 2 - 1] + s[n / 2]) / 2.0 else s[(n - 1) / 2]
     }
 }

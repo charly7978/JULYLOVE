@@ -43,6 +43,4 @@ object PpgAcquisitionTuning {
     const val ROI_FRACTION_TIGHT = 0.50
     const val ROI_FRACTION_LOOSE = 0.655
 
-    /** Coeficiente empírico verde pulsátil → índice tipo perfusion (consistencia temporal). */
-    const val GREEN_PERFUSION_SCALE = 120.0
 }

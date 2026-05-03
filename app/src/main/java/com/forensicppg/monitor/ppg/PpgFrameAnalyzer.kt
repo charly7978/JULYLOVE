@@ -163,9 +163,12 @@ class PpgFrameAnalyzer(
                 if (g >= 246) saturatedG++
                 if (b >= 246) saturatedB++
 
-                val dr = (r.toDouble() - zr).coerceIn(0.12, 255.93)
-                val dg = (g.toDouble() - zg).coerceIn(0.12, 255.93)
-                val db = (b.toDouble() - zb).coerceIn(0.12, 255.93)
+                // Resta de ZLO (zero light offset) — no introducir piso
+                // artificial: los píxeles oscuros legítimos deben quedar en
+                // 0..min(zr, zg, zb).
+                val dr = (r.toDouble() - zr).coerceIn(0.0, 255.0)
+                val dg = (g.toDouble() - zg).coerceIn(0.0, 255.0)
+                val db = (b.toDouble() - zb).coerceIn(0.0, 255.0)
                 val cr = dr.roundToInt().coerceIn(0, 255)
                 val cg = dg.roundToInt().coerceIn(0, 255)
                 val cb = db.roundToInt().coerceIn(0, 255)
@@ -229,10 +232,12 @@ class PpgFrameAnalyzer(
         val greenPulsatility = gb.coefficientVariation()
         val blueStable = bb.stabilityScore()
 
-        val perfusionGreenPct = kotlin.math.min(
-            PpgAcquisitionTuning.GREEN_PERFUSION_SCALE,
-            gAcDc * PpgAcquisitionTuning.GREEN_PERFUSION_SCALE
-        )
+        // Perfusion Index canónico: PI = 100 · AC/DC (en %). El "scale"
+        // mágico que multiplicaba por 120 producía valores 0..120 que NO
+        // representaban PI real y rompían los gates aguas abajo (pedían
+        // ≥0.43 fracción mientras el cálculo daba 0..120).
+        val perfusionGreenPct =
+            if (gDc > 1.0) (100.0 * gAcDc).coerceIn(0.0, 12.0) else 0.0
 
         val roiStats = RoiChannelStats(
             roiLeft = roi.x,

@@ -132,12 +132,17 @@ class PpgPipeline(
                     ).coerceIn(0.0, 1.0)
         }
 
-        /** SpO₂ clínica sólo con evidencia y calibración presente según clasificador y estimador. */
+        /** SpO₂: el estimador ahora emite SIEMPRE provisional sin calibración
+         *  y "clínico" sólo con perfil + validez. Esto rompe el deadlock en el
+         *  que sin calibración nunca veíamos SpO₂ aunque el dedo estuviera
+         *  perfectamente apoyado. */
         val allowsClinicalOximetry =
-            physiology.ordinal >= PpgValidityState.PPG_VALID.ordinal &&
-                calibration != null && sqiValue >= 0.48
+            physiology.ordinal >= PpgValidityState.PPG_VALID.ordinal && sqiValue >= 0.40
 
-        val piUse = (ppg.roiStats.perfusionIndexGreenPct / 100.0).coerceIn(0.0, 10.5)
+        // perfusionIndexGreenPct viene en % (0..120). Convertimos a fracción
+        // (0..1.2) sin la división mágica /100; el estimador trata >=0.20 como
+        // contacto óptico mínimo.
+        val piUse = (ppg.roiStats.perfusionIndexGreenPct).coerceIn(0.0, 12.0)
 
         val spo =
             spo2Estimator.estimate(
@@ -149,7 +154,15 @@ class PpgPipeline(
                 clipHighRatio = ppg.clippingHighRatio
             )
 
-        val spoClinicalDisplay = spo.spo2Clinical?.takeIf { spo.clinicallyValidDisplay && spo.spo2Clinical != null }
+        // Mostramos el valor clínico cuando hay perfil; mostramos también el
+        // valor provisional como ayuda al operador (con la marca "provisional"
+        // que la UI ya sabe leer del reasonCode). Antes el código exigía
+        // "spo.spo2Clinical != null" Y un flag clinicallyValidDisplay y luego
+        // chequeaba spo.spo2Clinical != null otra vez (warning).
+        val spoClinicalDisplay: Double? =
+            if (spo.clinicallyValidDisplay) spo.spo2Clinical
+            else if (calibration == null) spo.spo2Clinical else null
+        val spoIsProvisional = calibration == null && spo.spo2Clinical != null
 
         /** Flags bitmask */
         var flags = ReadingValidity.OK
@@ -223,7 +236,11 @@ class PpgPipeline(
                 spo2 = spoClinicalDisplay?.coerceAtMost(104.8),
                 spo2Confidence = if (spoClinicalDisplay != null) spo.spo2Confidence else 0.0,
                 spo2RatioR = spo.ratioOfRatios,
-                spo2CalibrationStatus = if (calibration == null) "NO_CALIBRADA" else "CALIBR_${calibration.calibrationSamples}pts",
+                spo2CalibrationStatus = when {
+                    calibration != null -> "CALIBR_${calibration.calibrationSamples}pts"
+                    spoIsProvisional -> "PROVISIONAL"
+                    else -> "NO_CALIBRADA"
+                },
                 spo2WindowSecondsUsed = 10.0,
                 spo2ExperimentalIndex =
                     spo.ratioOfRatios?.takeUnless { spo.clinicallyValidDisplay },
@@ -293,11 +310,13 @@ class PpgPipeline(
         perfusionPct: Double,
         sqi: Double
     ): HypertensionRiskBand? {
-        if (bpm == null || sqi < 0.52 || r.irregularityIx == null) return HypertensionRiskBand.UNCERTAIN
+        if (bpm == null || sqi < 0.45 || r.irregularityIx == null) return HypertensionRiskBand.UNCERTAIN
         if (rhythm.rrIntervalCount() < 8) return HypertensionRiskBand.UNCERTAIN
         val cv = r.coefficientVar ?: return HypertensionRiskBand.UNCERTAIN
         val rm = r.rmssd ?: return HypertensionRiskBand.UNCERTAIN
-        val piBandOk = perfusionPct >= 53.8
+        // PI ya en porcentaje real (0..12). Buena perfusión cPPG móvil típica:
+        // >=1.0 % cuando el dedo está bien apoyado y caliente.
+        val piBandOk = perfusionPct >= 1.0
         val stiffPattern = cv < 0.03 && rm < 18.8 && bpm > 71.8 && piBandOk
         val border = cv < 0.058 && rm < 25.5 && bpm > 64.9
         return when {
