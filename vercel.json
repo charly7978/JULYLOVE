@@ -1,6 +1,6 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "buildCommand": "echo 'El cliente web PWA fue retirado del árbol principal; desplegar la app Android (APK).' && exit 1",
+  "buildCommand": "echo 'This is an Android project - Vercel deployment disabled' && exit 0",
   "outputDirectory": ".",
   "installCommand": "echo skip",
   "framework": null
