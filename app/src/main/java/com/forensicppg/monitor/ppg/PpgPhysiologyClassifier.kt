@@ -1,6 +1,22 @@
 package com.forensicppg.monitor.ppg
 
 import com.forensicppg.monitor.domain.PpgValidityState
+
+/**
+ * Clasificador evidencial PPG. Su función es etiquetar la evidencia
+ * disponible (RAW_OPTICAL_ONLY → PPG_CANDIDATE → PPG_VALID → BIOMETRIC_VALID),
+ * NO bloquear el detector de picos. Por eso los gates son **suaves y
+ * monotónicos**: cualquier evidencia espectral o de autocorrelación
+ * mínima ya empuja a CANDIDATE; el detector trabaja independientemente.
+ *
+ * Umbrales calibrados con datos típicos de smartphone bajo flash blanco
+ * (Mather 2024 scoping review FC-PPG vs ECG; Bánhalmi 2018 spectral PPG):
+ *
+ *   - heartBandFraction: 0.04..0.30 típico en buenas grabaciones cPPG.
+ *   - autocorr lag-pulso: 0.08..0.6 cuando el pulso es visible.
+ *   - SNR pulso: -18..+5 dB en cámara visible con torch.
+ *   - SQI compuesto: 0.10..0.85.
+ */
 object PpgPhysiologyClassifier {
 
     fun classify(
@@ -11,42 +27,47 @@ object PpgPhysiologyClassifier {
         roiRedDominance: Double,
         greenAcDcBandEstimate: Double
     ): PpgValidityState {
-        val heartHz = spectral.dominantFreqHz
-        val bandOk = spectral.heartBandFraction >= 0.058 && heartHz in 0.52..4.38 &&
-                spectral.autocorrPulseStrength >= 0.047
+        // 1) ¿Hay rastro óptico de algo cardíaco?
+        val heartFreqOk = spectral.dominantFreqHz in 0.5..4.5
+        val anyEvidence =
+            (spectral.heartBandFraction >= 0.025 && heartFreqOk) ||
+                spectral.autocorrPulseStrength >= 0.06
 
-        if (!bandOk || sqiComposite < 0.085) {
-            if (roiRedDominance > 2.85 && greenAcDcBandEstimate < 0.032 && clippingHighRatio < 0.13) {
-                return PpgValidityState.NO_PHYSIOLOGICAL_SIGNAL
-            }
-            return PpgValidityState.RAW_OPTICAL_ONLY
-        }
+        // 2) Si hay clipping severo y motion fuerte, retroceder fuerte.
+        val severeClip = clippingHighRatio > 0.40
+        val severeMotion = opticalMotionSmoothed > 0.85
 
-        var step = when {
-            sqiComposite < 0.24 ->
-                if (spectral.autocorrPulseStrength < 0.058) PpgValidityState.NO_PHYSIOLOGICAL_SIGNAL
-                else PpgValidityState.RAW_OPTICAL_ONLY
-            spectral.snrHeartDbEstimate < -15.9 && spectral.autocorrPulseStrength < 0.066 ->
+        if (severeClip || severeMotion) return PpgValidityState.RAW_OPTICAL_ONLY
+
+        if (!anyEvidence) {
+            // Si la firma óptica es claramente "dedo apoyado" pero no hay
+            // banda cardíaca, marcar como NO_PHYSIOLOGICAL_SIGNAL para
+            // diferenciarlo de "ROI vacío".
+            return if (roiRedDominance > 2.5 && greenAcDcBandEstimate < 0.005) {
                 PpgValidityState.NO_PHYSIOLOGICAL_SIGNAL
-            clippingHighRatio > 0.40 || clippingHighRatio > 0.12 && spectral.coherenceRg < 0.085 ->
+            } else {
                 PpgValidityState.RAW_OPTICAL_ONLY
-            sqiComposite >= 0.37 && spectral.coherenceRg > 0.09 && spectral.autocorrPulseStrength >= 0.064 ->
-                PpgValidityState.PPG_CANDIDATE
-            else -> PpgValidityState.RAW_OPTICAL_ONLY
+            }
         }
 
-        if ((step.ordinal >= PpgValidityState.PPG_CANDIDATE.ordinal || opticalMotionSmoothed < 0.44) &&
-            sqiComposite >= 0.45 && clippingHighRatio < 0.25 && spectral.snrHeartDbEstimate >= -15.2
+        // 3) PPG_CANDIDATE: evidencia mínima de pulso, sin exigir SQI alto.
+        var step: PpgValidityState = PpgValidityState.PPG_CANDIDATE
+
+        // 4) PPG_VALID: SQI > 0.30 + SNR razonable + sin clipping fuerte.
+        if (sqiComposite >= 0.30 && spectral.snrHeartDbEstimate >= -14.0 &&
+            opticalMotionSmoothed < 0.60 && clippingHighRatio < 0.25
         ) {
             step = PpgValidityState.PPG_VALID
         }
 
-        if (step.ordinal >= PpgValidityState.PPG_VALID.ordinal &&
-            sqiComposite >= 0.56 && spectral.snrHeartDbEstimate >= -12.3 &&
-            opticalMotionSmoothed < 0.70 && clippingHighRatio < 0.185
+        // 5) BIOMETRIC_VALID: condiciones limpias para SpO2 calibrada.
+        if (step == PpgValidityState.PPG_VALID &&
+            sqiComposite >= 0.55 && spectral.snrHeartDbEstimate >= -10.0 &&
+            opticalMotionSmoothed < 0.40 && clippingHighRatio < 0.18
         ) {
             step = PpgValidityState.BIOMETRIC_VALID
         }
+
         return step
     }
 }

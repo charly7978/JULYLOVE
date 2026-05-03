@@ -22,8 +22,10 @@ import android.os.SystemClock
 import android.util.Range
 import android.util.Size
 import androidx.core.content.ContextCompat
+import android.media.Image
 import com.forensicppg.monitor.domain.ExposureDiagnostics
 import com.forensicppg.monitor.domain.PpgSample
+import com.forensicppg.monitor.forensic.CrashLogger
 import com.forensicppg.monitor.ppg.AppliedSensorZlo
 import com.forensicppg.monitor.ppg.PpgFrameAnalyzer
 import com.forensicppg.monitor.ppg.RoiGeometryPreset
@@ -202,47 +204,21 @@ class Camera2PpgController(private val context: Context) {
             ).coerceIn(8_333_333L, 166_666_666L)
 
         reader.setOnImageAvailableListener({ ir ->
-            val cfg = activeConfig ?: return@setOnImageAvailableListener
-            val hwNote =
-                if (!cfg.manualControlApplied) "Control sensor manual incompleto (AE/ISO en modo degradado)"
-                else null
-            while (true) {
-                val img = try {
-                    ir.acquireNextImage()
-                } catch (_: IllegalStateException) {
-                    break
-                } catch (_: Throwable) {
-                    break
-                }
-                try {
-                    val ts = img.timestamp
-                    prevImageTs?.let { p ->
-                        val gapMs = abs(ts - p) / 1_000_000.0
-                        jitterEmaMs = if (jitterEmaMs == 0.0) gapMs else 0.91 * jitterEmaMs + 0.09 * gapMs
-                        val instFps = 1000.0 / gapMs.coerceAtLeast(0.52)
-                        fpsEmaHz = if (fpsEmaHz == 0.0) instFps else 0.90 * fpsEmaHz + 0.10 * instFps
-                        val nominalMs = nominalFrameNs / 1_000_000.0 * FRAME_DROP_GAP_MULTIPLIER
-                        if (gapMs > nominalMs.coerceAtLeast(18.5)) drops.incrementAndGet()
-                    }
-                    prevImageTs = ts
-
-                    val diag = ExposureDiagnostics(
-                        exposureTimeNs = liveExposureNs ?: cfg.manualExposureNs,
-                        iso = liveIso ?: cfg.manualIso,
-                        frameDurationNs = liveFrameDurationNs ?: cfg.manualFrameDurationNs,
-                        torchEnabled = cfg.torchEnabled,
-                        hardwareLimitNote = hwNote,
-                        aeLocked = cfg.aeLocked,
-                        awbLocked = cfg.awbLocked,
-                        ispAcquisitionSummary = cfg.ispAcquisitionSummary
-                    )
-
-                    analyzer.analyze(img, SystemClock.elapsedRealtimeNanos(), diag)?.let {
-                        frames.tryEmit(it)
-                    }
-                } finally {
-                    img.close()
-                }
+            // CRÍTICO: este callback corre en el HandlerThread "ppg-camera2",
+            // FUERA de cualquier corrutina o coroutine exception handler. Si
+            // sale cualquier excepción no atrapada AQUÍ, mata el proceso.
+            // El crash report del 2026-05-02 mostró exactamente eso: un NPE
+            // sobre `img.close()` en línea 244 → crashed thread `ppg-camera2`.
+            //
+            // `ImageReader.acquireNextImage()` PUEDE devolver null (la API
+            // doc dice: "Returns the latest frame of image data, or null if
+            // no image data is available"). Antes el código iteraba en un
+            // bucle while(true) y al primer null que llegaba el `img.close()`
+            // en el `finally` lanzaba NPE.
+            try {
+                drainReader(ir)
+            } catch (e: Throwable) {
+                CrashLogger.reportNonFatal("Camera2.onImageAvailable", e)
             }
         }, bgHandler)
 
@@ -254,16 +230,81 @@ class Camera2PpgController(private val context: Context) {
                     request: CaptureRequest,
                     result: TotalCaptureResult
                 ) {
-                    liveExposureNs = result.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: liveExposureNs
-                    liveIso = result.get(CaptureResult.SENSOR_SENSITIVITY) ?: liveIso
-                    liveFrameDurationNs =
-                        result.get(CaptureResult.SENSOR_FRAME_DURATION) ?: liveFrameDurationNs
+                    try {
+                        liveExposureNs = result.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: liveExposureNs
+                        liveIso = result.get(CaptureResult.SENSOR_SENSITIVITY) ?: liveIso
+                        liveFrameDurationNs =
+                            result.get(CaptureResult.SENSOR_FRAME_DURATION) ?: liveFrameDurationNs
+                    } catch (e: Throwable) {
+                        CrashLogger.reportNonFatal("Camera2.onCaptureCompleted", e)
+                    }
                 }
             },
             bgHandler
         )
 
         return activeConfig!!
+    }
+
+    /**
+     * Drena el reader sin propagar excepciones. Cada imagen procesada se
+     * cierra en su propio finally. Si `acquireNextImage` devuelve null
+     * (legal en la API) cortamos el bucle limpiamente.
+     */
+    private fun drainReader(ir: android.media.ImageReader) {
+        val cfg = activeConfig ?: return
+        val hwNote =
+            if (!cfg.manualControlApplied) "Control sensor manual incompleto (AE/ISO en modo degradado)"
+            else null
+        while (true) {
+            val img: Image? = try {
+                ir.acquireNextImage()
+            } catch (_: IllegalStateException) {
+                null
+            } catch (_: Throwable) {
+                null
+            }
+            if (img == null) return
+            try {
+                val ts = img.timestamp
+                prevImageTs?.let { p ->
+                    val gapMs = abs(ts - p) / 1_000_000.0
+                    jitterEmaMs = if (jitterEmaMs == 0.0) gapMs else 0.91 * jitterEmaMs + 0.09 * gapMs
+                    val instFps = 1000.0 / gapMs.coerceAtLeast(0.52)
+                    fpsEmaHz = if (fpsEmaHz == 0.0) instFps else 0.90 * fpsEmaHz + 0.10 * instFps
+                    val nominalMs = nominalFrameNs / 1_000_000.0 * FRAME_DROP_GAP_MULTIPLIER
+                    if (gapMs > nominalMs.coerceAtLeast(18.5)) drops.incrementAndGet()
+                }
+                prevImageTs = ts
+
+                val diag = ExposureDiagnostics(
+                    exposureTimeNs = liveExposureNs ?: cfg.manualExposureNs,
+                    iso = liveIso ?: cfg.manualIso,
+                    frameDurationNs = liveFrameDurationNs ?: cfg.manualFrameDurationNs,
+                    torchEnabled = cfg.torchEnabled,
+                    hardwareLimitNote = hwNote,
+                    aeLocked = cfg.aeLocked,
+                    awbLocked = cfg.awbLocked,
+                    ispAcquisitionSummary = cfg.ispAcquisitionSummary
+                )
+
+                val sample = try {
+                    analyzer.analyze(img, SystemClock.elapsedRealtimeNanos(), diag)
+                } catch (e: Throwable) {
+                    CrashLogger.reportNonFatal("PpgFrameAnalyzer.analyze", e)
+                    null
+                }
+                if (sample != null) {
+                    runCatching { frames.tryEmit(sample) }
+                }
+            } catch (e: Throwable) {
+                // Cualquier excepción durante el procesamiento de una imagen
+                // se loguea pero NO mata al loop ni al proceso.
+                CrashLogger.reportNonFatal("Camera2.processImage", e)
+            } finally {
+                runCatching { img.close() }
+            }
+        }
     }
 
     fun stop() {
