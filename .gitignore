@@ -6,6 +6,7 @@ build/
 .kotlin/
 
 local.properties
+android-sdk/
 
 # Web archivada (duplicado de pipeline; no es módulo Gradle)
 _archived_web_ppg_duplicate/
