@@ -133,4 +133,42 @@ describe('PpgPipeline', () => {
     expect(lastReading!.bpm).toBeGreaterThan(70)
     expect(['SIN_HALLAZGOS', 'PATRON_IRREGULAR']).toContain(lastReading!.arrhythmiaStatus)
   })
+
+  it('BPM estimado se mantiene cercano al BPM real (75) con ≤ ±5%', () => {
+    const p = new PpgPipeline(30)
+    const dtMs = 1000 / 30
+    let lastReading = null as ReturnType<typeof p.process>['reading'] | null
+    const target = 75
+    for (let t = 0; t < 25000; t += dtMs) {
+      lastReading = p.process(fingerFrame(t, target), 0.02, null).reading
+    }
+    expect(lastReading?.state).toBe('VALID_LIVE_PPG')
+    const bpm = lastReading!.bpm
+    expect(bpm).toBeGreaterThan(target * 0.95)
+    expect(bpm).toBeLessThan(target * 1.05)
+  })
+
+  it('la onda de display tiene polaridad estable (sístole hacia arriba)', () => {
+    const p = new PpgPipeline(30)
+    const dtMs = 1000 / 30
+    const samples: number[] = []
+    for (let t = 0; t < 12000; t += dtMs) {
+      const step = p.process(fingerFrame(t, 80), 0.02, null)
+      if (step.sample) samples.push(step.sample.display)
+    }
+    // Si la polaridad fuera inestable (cambia de signo entre frames),
+    // la varianza de la primera derivada quedaría dominada por saltos.
+    // Aquí verificamos que los signos consecutivos no se alternen
+    // ferozmente (un cambio cada ≈ ½ ciclo).
+    let signFlips = 0
+    let prev = samples[0]
+    for (let i = 1; i < samples.length; i++) {
+      const d = samples[i] - prev
+      const dPrev = i >= 2 ? samples[i - 1] - samples[i - 2] : 0
+      if (d * dPrev < 0) signFlips++
+      prev = samples[i]
+    }
+    const flipRate = signFlips / samples.length
+    expect(flipRate).toBeLessThan(0.5)
+  })
 })

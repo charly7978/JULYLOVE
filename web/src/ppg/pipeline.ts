@@ -55,14 +55,26 @@ const BLANK_READING = (state: MeasurementState, message: string): VitalReading =
 })
 
 /**
- * Pipeline PPG real, fail-closed, con una sola fuente de verdad biométrica.
+ * Pipeline PPG real, fail-closed, con polaridad y canal FIJOS.
  *
- * Cadena:
- *   frame -> preprocesado -> detector SSF -> SQI/chroma -> evidencia viva
- *   -> publicación clínica.
+ * Modelo físico (dedo sobre cámara + flash blanco):
+ *   - Sístole = mayor absorción de hemoglobina = MENOS luz reflejada en
+ *     R y G. Por tanto la "muestra cruda" del canal verde CAE en sístole.
+ *     Convertimos a "señal con sístole hacia ARRIBA" usando `-G_filtered`.
+ *   - El canal verde tiene la mejor relación contraste-ruido pulsátil
+ *     bajo flash blanco (la hemoglobina absorbe ~10× más verde que
+ *     rojo: ε_HbO2 a 540 nm >> a 660 nm). Por eso el detector de picos
+ *     trabaja sobre G.
+ *   - SpO₂ se computa con ratio-of-ratios = (AC_R/DC_R)/(AC_G/DC_G).
+ *     Bajo flash blanco esa es la formulación canónica para cámara
+ *     visible (Scully 2012, Lamonaca 2017, Ding 2018).
  *
- * Regla madre:
- *   si la evidencia viva no es válida, biomarcadores se publican en cero.
+ * Cadena por frame:
+ *   contacto → detrend+banda(R,G) → SSF sobre -G → picos → clasificación
+ *   → SpO₂ R/G → puerta de evidencia viva → publicación.
+ *
+ * Regla madre: si la evidencia viva no es válida, los biomarcadores se
+ * publican en cero. Sin valores cosméticos.
  */
 export class PpgPipeline {
   private readonly fsNominal: number
@@ -88,11 +100,6 @@ export class PpgPipeline {
   private bpmSmooth: number | null = null
   private readonly bpmEmaAlpha = 0.15
 
-  private readonly acBufRed: Float64Array
-  private readonly acBufGreen: Float64Array
-  private acIdx = 0
-  private acFilled = 0
-
   constructor(fsNominal = 30) {
     this.fsNominal = fsNominal
     this.preRed = new PpgPreprocessor(fsNominal, 0.5, 4.0)
@@ -107,9 +114,6 @@ export class PpgPipeline {
     this.contact = new FingerContactDetector()
     this.chroma = new ChromaticGate()
     this.evidence = new LivePpgEvidenceGate()
-    const bufN = Math.round(fsNominal * 3)
-    this.acBufRed = new Float64Array(bufN)
-    this.acBufGreen = new Float64Array(bufN)
   }
 
   setTargetFps(_: number): void { /* fs nominal fija; el pipeline procesa 1 muestra por frame */ }
@@ -131,10 +135,6 @@ export class PpgPipeline {
     this.fpsJitter = 0
     this.lastFrameTsMs = null
     this.bpmSmooth = null
-    this.acBufRed.fill(0)
-    this.acBufGreen.fill(0)
-    this.acIdx = 0
-    this.acFilled = 0
   }
 
   private resetOnContactLost(): void {
@@ -150,10 +150,6 @@ export class PpgPipeline {
     this.totalBeats = 0
     this.abnormalBeats = 0
     this.bpmSmooth = null
-    this.acBufRed.fill(0)
-    this.acBufGreen.fill(0)
-    this.acIdx = 0
-    this.acFilled = 0
   }
 
   fpsActual(): number { return this.fpsMovingAvg }
@@ -174,7 +170,7 @@ export class PpgPipeline {
       return {
         sample: null,
         reading: {
-          ...BLANK_READING('NO_CONTACT', 'Coloque el dedo sobre la cámara y el flash'),
+          ...BLANK_READING('NO_CONTACT', 'Cubra cámara + flash con la yema del dedo índice'),
           reasonCodes
         },
         beat: null,
@@ -184,39 +180,33 @@ export class PpgPipeline {
       }
     }
 
-    // Alimentamos los filtros siempre durante contacto probable para que
-    // converjan antes de alcanzar VALID_LIVE_PPG.
+    // Alimentamos los filtros siempre durante contacto probable para
+    // que converjan antes de alcanzar VALID_LIVE_PPG.
     const redOut = this.preRed.process(frame.redMean)
     const greenOut = this.preGreen.process(frame.greenMean)
     this.spo2.push(frame.redMean, frame.greenMean, frame.blueMean)
 
-    this.acBufRed[this.acIdx] = redOut.filtered
-    this.acBufGreen[this.acIdx] = greenOut.filtered
-    this.acIdx = (this.acIdx + 1) % this.acBufRed.length
-    if (this.acFilled < this.acBufRed.length) this.acFilled++
+    // Canal de medición: VERDE (mayor contraste pulsátil bajo flash
+    // blanco, ε_HbO2(540nm) ≫ ε_HbO2(660nm)). Polaridad: sístole = caída
+    // de luz reflejada → se invierte para que el detector trabaje sobre
+    // una señal cuyas sístoles SUBEN.
+    const greenPulse = -greenOut.filtered
+    const greenPi = greenOut.perfusionIndex
+    this.spectral.push(greenPulse)
 
-    const ampRed = amplitude(this.acBufRed, this.acFilled)
-    const ampGreen = amplitude(this.acBufGreen, this.acFilled)
-    const useGreen = ampGreen > ampRed * 1.05
-    const chosenFiltered = useGreen ? greenOut.filtered : redOut.filtered
-    const chosenDisplay = useGreen ? greenOut.display : redOut.display
-    const chosenPolarity = 1
-    const chosenPi = useGreen ? greenOut.perfusionIndex : redOut.perfusionIndex
-
-    this.spectral.push(-chosenFiltered)
-
-    const canAnalyze = this.acFilled >= Math.round(this.fsNominal * 2)
+    const canAnalyze = this.preGreen.acFilled() >= Math.round(this.fsNominal * 2)
     let beatCandidate: BeatEvent | null = null
     let pulseEvidence = false
     if (canAnalyze) {
-      // El detector SSF ya valida rango fisiológico, coherencia y amplitud
-      // internamente, así que aquí sólo aplicamos SQI mínimo.
-      const d = this.detector.feed(chosenFiltered, frame.timestampMs, chosenPolarity)
+      // El detector SSF ya valida rango fisiológico, coherencia y
+      // amplitud internamente. Aquí sólo aplicamos un SQI rápido como
+      // gate adicional.
+      const d = this.detector.feed(greenPulse, frame.timestampMs, 1)
       if (d) {
         const prev = this.lastBeatTsMs
         const rr = prev !== null ? d.timestampMs - prev : null
         const bpmInstant = rr !== null && rr > 0 ? 60000 / rr : null
-        const sqiQuick = this.estimateSqiQuick(chosenPi, motionScore, frame.clipHighRatio)
+        const sqiQuick = this.estimateSqiQuick(greenPi, motionScore, frame.clipHighRatio)
         if (sqiQuick >= PROCESSING.MIN_SQI_QUICK_FOR_BEAT) {
           const raw: BeatEvent = {
             timestampMs: d.timestampMs,
@@ -244,7 +234,7 @@ export class PpgPipeline {
     const screeningSummary = this.screening.compute(1.0)
     const sqiValue = this.sqi.evaluate({
       hasContact: true,
-      perfusionIndex: chosenPi,
+      perfusionIndex: greenPi,
       clipHighRatio: frame.clipHighRatio,
       clipLowRatio: frame.clipLowRatio,
       motionScore,
@@ -253,6 +243,9 @@ export class PpgPipeline {
       spectralCoherence: 0,
       rrCv: screeningSummary.coefficientOfVariation,
       rrCount: screeningSummary.rrCount,
+      // La "estabilidad espacial" del rojo crudo en cámara con flash
+      // está dominada por la sombra de los pliegues de la yema y es
+      // del orden de 30-80 niveles RGB. La SQI re-mapea ese rango.
       roiSpatialStd: Math.sqrt(Math.max(0, frame.roiVariance))
     })
 
@@ -262,7 +255,7 @@ export class PpgPipeline {
     const fused = this.fusion.fuse(rrBpm, screeningSummary.rrCount, spec.bpm, spec.coherence, sqiValue)
     const spo2Result = this.spo2.estimate(
       calibration,
-      chosenPi,
+      greenPi,
       sqiValue,
       motionScore,
       frame.clipHighRatio
@@ -274,13 +267,13 @@ export class PpgPipeline {
       screeningSummary.rrCount >= PROCESSING.MIN_VALID_RR_COUNT &&
       sqiValue >= PROCESSING.MIN_SQI_FOR_VALID &&
       chromaResult.passed &&
-      chosenPi >= PROCESSING.MIN_PERFUSION_FOR_VALID &&
+      greenPi >= PROCESSING.MIN_PERFUSION_FOR_VALID &&
       motionScore <= PROCESSING.MAX_MOTION_FOR_VALID
     const evidenceResult = this.evidence.evaluate({
       chromaPassed: chromaResult.passed,
       hasPulseEvidence: pulseEvidence || forceValidFromSustainedRhythm,
       sqi: sqiValue,
-      perfusionIndex: chosenPi,
+      perfusionIndex: greenPi,
       motionScore,
       clipHighRatio: frame.clipHighRatio,
       clipLowRatio: frame.clipLowRatio
@@ -288,7 +281,7 @@ export class PpgPipeline {
 
     let allFlags = contactDecision.flags | chromaResult.flags
     if (this.fpsMovingAvg > 1 && this.fpsMovingAvg < 12) allFlags |= VALIDITY.LOW_FPS
-    if (chosenPi < 0.2) allFlags |= VALIDITY.LOW_PERFUSION
+    if (greenPi < 0.2) allFlags |= VALIDITY.LOW_PERFUSION
     if (screeningSummary.rrCount < PROCESSING.MIN_VALID_RR_COUNT) allFlags |= VALIDITY.NOT_ENOUGH_BEATS
 
     const finalState = evidenceResult.state === 'VALID_LIVE_PPG' ? 'VALID_LIVE_PPG' : 'PROBABLE_PPG'
@@ -302,7 +295,8 @@ export class PpgPipeline {
     const canShowSpo2 = canShowBpm && spo2Result.spo2 !== null
     const canScreenRhythm = finalState === 'VALID_LIVE_PPG' && screeningSummary.rrCount >= PROCESSING.MIN_VALID_RR_COUNT
 
-    // EMA del BPM publicado: evita saltos 70→120→90 entre RR consecutivos.
+    // EMA del BPM publicado: evita saltos 70→120→90 entre RR
+    // consecutivos.
     let bpmPublished = 0
     if (canShowBpm && fused.bpm !== null) {
       if (this.bpmSmooth === null) this.bpmSmooth = fused.bpm
@@ -312,16 +306,23 @@ export class PpgPipeline {
       this.bpmSmooth = null
     }
 
+    // Para mostrar la onda en pantalla usamos la señal G "display"
+    // (detrended + LP suave). Invertimos para que la sístole apunte
+    // hacia arriba (familiar al ojo clínico).
     const sample: PpgSample = {
       timestampMs: frame.timestampMs,
-      raw: useGreen ? frame.greenMean : frame.redMean,
-      filtered: chosenFiltered,
-      display: -chosenDisplay,
+      raw: frame.greenMean,
+      filtered: greenPulse,
+      display: -greenOut.display,
       sqi: sqiValue,
-      perfusionIndex: chosenPi,
+      perfusionIndex: greenPi,
       motionScore,
       valid: finalState === 'VALID_LIVE_PPG'
     }
+
+    // El canal rojo se sigue procesando para SpO₂ aunque no se use en
+    // la onda. La línea siguiente evita que TS lo reporte como unused.
+    void redOut
 
     const combinedReasons = [
       ...contactDecision.reasonCodes,
@@ -337,7 +338,7 @@ export class PpgPipeline {
       spo2: canShowSpo2 ? (spo2Result.spo2 ?? 0) : 0,
       spo2Confidence: canShowSpo2 ? spo2Result.confidence : 0,
       sqi: sqiValue,
-      perfusionIndex: chosenPi,
+      perfusionIndex: greenPi,
       motionScore,
       rrMs: canShowBpm ? (screeningSummary.meanRr ?? 0) : 0,
       rrSdnnMs: canShowBpm ? (screeningSummary.sdnnMs ?? 0) : 0,
@@ -397,27 +398,15 @@ export class PpgPipeline {
     flags: number,
     evidenceReasons: string[]
   ): string {
-    if (state === 'NO_CONTACT') return 'Coloque el dedo sobre la cámara y el flash'
+    if (state === 'NO_CONTACT') return 'Cubra cámara + flash con la yema del dedo índice'
     if (state === 'PROBABLE_PPG') return 'Adquiriendo evidencia pulsátil — mantenga el dedo inmóvil'
-    if (flags & VALIDITY.MOTION_HIGH) return 'Movimiento excesivo — inmovilice el dedo'
+    if (flags & VALIDITY.MOTION_HIGH) return 'Movimiento excesivo — apoye la mano'
     if (flags & VALIDITY.CLIPPING_HIGH) return 'Saturación óptica — reduzca la presión'
-    if (flags & VALIDITY.CLIPPING_LOW) return 'Imagen demasiado oscura — revise el flash'
-    if (flags & VALIDITY.LOW_PERFUSION) return 'Baja perfusión — caliente el dedo'
+    if (flags & VALIDITY.CLIPPING_LOW) return 'Imagen demasiado oscura — verifique cobertura del flash'
+    if (flags & VALIDITY.LOW_PERFUSION) return 'Baja perfusión — caliente el dedo o relaje la presión'
     if (flags & VALIDITY.LOW_FPS) return 'FPS inestable — verifique condiciones del dispositivo'
     if (state !== 'VALID_LIVE_PPG') return 'Entrada no validada'
     if (evidenceReasons.length > 0) return 'PPG inestable — sostenga presión y quietud'
     return 'PPG válido en vivo'
   }
-}
-
-function amplitude(buf: Float64Array, filled: number): number {
-  if (filled < 3) return 0
-  let mx = -Infinity
-  let mn = Infinity
-  for (let i = 0; i < filled; i++) {
-    const v = buf[i]
-    if (v > mx) mx = v
-    if (v < mn) mn = v
-  }
-  return mx - mn
 }
