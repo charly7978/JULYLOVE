@@ -20,5 +20,7 @@ data class CameraSessionConfig(
     val manualIso: Int?,
     val manualFrameDurationNs: Long?,
     val aeLocked: Boolean,
-    val awbLocked: Boolean
+    val awbLocked: Boolean,
+    /** Resumen de intentos ISP mínimos (NR/EDGE/FX…) — reproducible dentro de OEM. */
+    val ispAcquisitionSummary: String?
 )

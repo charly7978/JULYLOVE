@@ -72,6 +72,11 @@ class SessionExporter(private val context: Context) {
         o.put("framesTotal", s.framesTotal)
         o.put("framesAccepted", s.framesAccepted)
         o.put("framesRejected", s.framesRejected)
+        o.put("ispAcquisitionSummary", s.ispAcquisitionSummary ?: JSONObject.NULL)
+        o.put("sensorZloR", if (s.sensorZloR != null) s.sensorZloR else JSONObject.NULL)
+        o.put("sensorZloG", if (s.sensorZloG != null) s.sensorZloG else JSONObject.NULL)
+        o.put("sensorZloB", if (s.sensorZloB != null) s.sensorZloB else JSONObject.NULL)
+        o.put("zloSourceNote", s.zloSourceNote ?: JSONObject.NULL)
         o.put("calibrationProfileId", s.calibrationProfileId ?: JSONObject.NULL)
         o.put("finalBpmMean", s.finalBpmMean ?: JSONObject.NULL)
         o.put("finalBpmSdnn", s.finalBpmSdnn ?: JSONObject.NULL)
@@ -96,13 +101,16 @@ class SessionExporter(private val context: Context) {
     private fun writeSamples(f: File, s: MeasurementSession) {
         f.bufferedWriter().use { w ->
             w.write(
-                "timestampNs,monotonicRealtimeNs,rawRed,rawGreen,rawBlue,filtPri,display,sqi,motion,opticalMot," +
+                "timestampNs,monotonicRealtimeNs," +
+                    "roiMeanPreZloRed,roiMeanPreZloGreen,roiMeanPreZloBlue," +
+                    "rawRed,rawGreen,rawBlue,filtPri,display,sqi,motion,opticalMot," +
                     "perfusionGreenPct,clipH,clipL,lowLight,roiWd,roiHt\n"
             )
             for (sm in s.samples) {
                 val rs = sm.roiStats
                 w.write(
                     "${sm.timestampNs},${sm.monotonicRealtimeNs}," +
+                        "${sm.roiMeanPreZloRed},${sm.roiMeanPreZloGreen},${sm.roiMeanPreZloBlue}," +
                         "${sm.rawRed},${sm.rawGreen},${sm.rawBlue},${sm.filteredPrimary},${sm.displayWave}," +
                         "${sm.sqi},${sm.motionScore},${sm.motionScoreOptical}," +
                         "${rs.perfusionIndexGreenPct}," +
@@ -162,6 +170,11 @@ class SessionExporter(private val context: Context) {
             appendLine("SpO₂ medio: ${s.finalSpo2Mean}")
             appendLine("SQI medio: ${s.finalSqiMean}")
             appendLine("perfil calibración: ${s.calibrationProfileId ?: "(ninguno, SpO₂ no calibrado)"}")
+            appendLine("ISP (sesión): ${s.ispAcquisitionSummary ?: "—"}")
+            appendLine(
+                "ZLO efectivo — R:${s.sensorZloR ?: "—"} G:${s.sensorZloG ?: "—"} B:${s.sensorZloB ?: "—"} " +
+                    "origen:${s.zloSourceNote ?: "—"}"
+            )
         })
     }
 }

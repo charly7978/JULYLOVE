@@ -62,6 +62,13 @@ fun CameraDiagnosticsPanel(
             }
             Row { Labeled("Resolución", config?.previewSize?.let { "${it.width}×${it.height}" } ?: "—") }
 
+            Row {
+                Labeled(
+                    "ISP req",
+                    (config?.ispAcquisitionSummary)?.takeIf { it.isNotBlank() } ?: "—"
+                )
+            }
+
             if (diagnostics != null) {
                 Spacer(Modifier.height(8.dp))
                 Text("TELEMETRÍA CAPTURA", color = Color(0xFFFFAA22), fontFamily = FontFamily.Monospace, fontSize = 11.sp)
@@ -77,6 +84,28 @@ fun CameraDiagnosticsPanel(
                 diagnostics.lastExposureNs?.let { Row { Labeled("Últ. exp(ns)", it.toString()) } }
                 diagnostics.lastIso?.let { Row { Labeled("Últ. ISO", it.toString()) } }
                 diagnostics.hardwareLimitNote?.takeIf { it.isNotBlank() }?.let { Row { Labeled("HW límit.", it.take(96)) } }
+                diagnostics.ispAcquisitionSummary?.takeIf { it.isNotBlank() }?.let {
+                    LabeledDigest("ISP (telémetro muestra):", it.take(260))
+                }
+                val zloSet =
+                    diagnostics.sensorZloR != null || diagnostics.sensorZloG != null || diagnostics.sensorZloB != null
+                if (zloSet) {
+                    Row {
+                        Labeled(
+                            "ZLO RGB",
+                            listOfNotNull(
+                                diagnostics.sensorZloR?.let { r -> "%.2f".format(r) },
+                                diagnostics.sensorZloG?.let { g -> "%.2f".format(g) },
+                                diagnostics.sensorZloB?.let { b -> "%.2f".format(b) }
+                            ).joinToString(", ")
+                        )
+                    }
+                    diagnostics.zloSourceNote?.takeIf { it.isNotBlank() }?.let {
+                        LabeledDigest("Origen ZLO:", it.take(220))
+                    }
+                } else {
+                    Row { Labeled("ZLO", "(sin offsets / 0)") }
+                }
                 Row { Labeled("SpO₂ cal.", diagnostics.spo2CalibrationStatus.take(28)) }
                 LabeledDigest("Último digest rechazo:", diagnostics.lastRejectionDigest.take(240))
                 LabeledDigest("Ritmo:", diagnostics.rhythmDigest.take(180))

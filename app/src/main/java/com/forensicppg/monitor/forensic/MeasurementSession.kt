@@ -28,6 +28,13 @@ data class MeasurementSession(
     var framesTotal: Int = 0,
     var framesAccepted: Int = 0,
     var framesRejected: Int = 0,
+    /** Tramo ISP solicitado para la repetición Camera2 (tuning línea base). */
+    var ispAcquisitionSummary: String? = null,
+    /** ZLO efectivo cuando la sesión comienza o tras recalibración en vivo. */
+    var sensorZloR: Double? = null,
+    var sensorZloG: Double? = null,
+    var sensorZloB: Double? = null,
+    var zloSourceNote: String? = null,
     var calibrationProfileId: String? = null,
     val samples: MutableList<PpgSample> = mutableListOf(),
     val beats: MutableList<ConfirmedBeat> = mutableListOf(),

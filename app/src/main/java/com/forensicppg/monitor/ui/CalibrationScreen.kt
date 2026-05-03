@@ -35,6 +35,8 @@ fun CalibrationScreen(
 ) {
     val reading by viewModel.reading.collectAsState()
     val profile by viewModel.calibrationProfile.collectAsState()
+    val sensorZloStatus by viewModel.sensorZloStatus.collectAsState()
+    val monitoring by viewModel.running.collectAsState()
     var refSpo2 by remember { mutableStateOf("") }
     var pendingCount by remember { mutableStateOf(0) }
 
@@ -65,6 +67,53 @@ fun CalibrationScreen(
             fontFamily = FontFamily.Monospace,
             fontSize = 12.sp
         )
+        Spacer(Modifier.height(12.dp))
+        Text(
+            "Offset ZLO (nivel digital por modelo/cámara, Wang-style)",
+            color = Color(0xFFFFAA22),
+            fontFamily = FontFamily.Monospace,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Bold
+        )
+        Text(
+            "Cubra LED+lente con material opaco y mantenga quieto (~2 s) " +
+                "para mediana en oscuridad (mejor que sólo tabla literatura).",
+            color = Color(0xAACCFFEE),
+            fontFamily = FontFamily.Monospace,
+            fontSize = 11.sp
+        )
+        Spacer(Modifier.height(6.dp))
+        Text(
+            text = sensorZloStatus.ifBlank {
+                if (monitoring) "Pulse «Iniciar ZLO oscuro» con tapón FIRME sobre el LED." else "Inicie monitor para usar captura ZLO."
+            },
+            color = Color.White,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 11.sp
+        )
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(
+                onClick = { viewModel.startSensorZloDarkHarvest() },
+                enabled = monitoring,
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1565C0))
+            ) {
+                Text("Iniciar ZLO oscuro", color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+            }
+            Button(
+                onClick = { viewModel.abortSensorZloDarkHarvest() },
+                enabled = monitoring,
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF444444))
+            ) {
+                Text("Cancelar", color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+            }
+            Button(
+                onClick = { viewModel.revertSensorZloToLiterature() },
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF883333))
+            ) {
+                Text("Ancla lit.", color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+            }
+        }
         Spacer(Modifier.height(12.dp))
         Text("Estado actual", color = Color(0xFF22FFAA), fontFamily = FontFamily.Monospace, fontSize = 14.sp)
         Text("SQI: ${"%.2f".format(reading.sqi)}", color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 12.sp)

@@ -7,6 +7,11 @@ package com.forensicppg.monitor.domain
 data class PpgSample(
     val timestampNs: Long,
     val monotonicRealtimeNs: Long,
+    /** ROI medias antes de aplicar corrección ZLO (misma convención RGB que raw*). */
+    val roiMeanPreZloRed: Double,
+    val roiMeanPreZloGreen: Double,
+    val roiMeanPreZloBlue: Double,
+    /** Medias tras restar offsets ZLO (pipeline / SpO₂ / DSP usan estos). */
     val rawRed: Double,
     val rawGreen: Double,
     val rawBlue: Double,

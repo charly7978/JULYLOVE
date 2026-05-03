@@ -173,6 +173,7 @@ class PpgPipeline(
 
         val msgPrimary = composeMessage(physiology, flags, fusedMotion, calibration, enoughRrCount, spoClinicalDisplay)
 
+        val ex = ppg.exposureDiagnostics
         val diag = DiagnosticsSnapshot(
             measuredFps = acq.measuredFpsHz,
             targetFps = acq.targetFpsHint.coerceAtLeast(15),
@@ -180,16 +181,21 @@ class PpgPipeline(
             frameJitterMeanMs = acq.jitterMs,
             torchEnabled = acq.torchEnabled,
             manualSensorApplied = acq.manualSensorApplied,
-            hardwareLimitNote = ppg.exposureDiagnostics.hardwareLimitNote,
-            lastExposureNs = ppg.exposureDiagnostics.exposureTimeNs,
-            lastIso = ppg.exposureDiagnostics.iso,
+            hardwareLimitNote = ex.hardwareLimitNote,
+            lastExposureNs = ex.exposureTimeNs,
+            lastIso = ex.iso,
             peakConfirmedCountSession = peak.stats.confirmedSession,
             peakRejectedCountSession = peak.stats.rejectedSession,
             lastRejectionDigest = peak.stats.rejectDigest,
             spo2CalibrationStatus = calibration?.profileId ?: "sin_perfil_guardado",
             rhythmDigest =
                 rhythmPost.pattern.labelEs.take(118) +
-                    ";RRn=${rhythmPost.meanMs?.let { "%.0f".format(it) } ?: "-" }"
+                    ";RRn=${rhythmPost.meanMs?.let { "%.0f".format(it) } ?: "-" }",
+            sensorZloR = ex.sensorZloR,
+            sensorZloG = ex.sensorZloG,
+            sensorZloB = ex.sensorZloB,
+            zloSourceNote = ex.zloSourceSummary,
+            ispAcquisitionSummary = ex.ispAcquisitionSummary
         )
 
         val hypo =

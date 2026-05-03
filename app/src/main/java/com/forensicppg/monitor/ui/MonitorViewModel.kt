@@ -22,6 +22,8 @@ import com.forensicppg.monitor.pipeline.PpgPipeline
 import com.forensicppg.monitor.ppg.CalibrationPoint
 import com.forensicppg.monitor.ppg.CalibrationProfile
 import com.forensicppg.monitor.ppg.DeviceCalibrationManager
+import com.forensicppg.monitor.ppg.LiteratureZloFallback
+import com.forensicppg.monitor.ppg.SensorZloStore
 import com.forensicppg.monitor.sensors.MotionArtifactEstimator
 import com.forensicppg.monitor.sensors.MotionSensorController
 import kotlinx.coroutines.Dispatchers
@@ -36,6 +38,7 @@ import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 
 class MonitorViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -43,6 +46,7 @@ class MonitorViewModel(application: Application) : AndroidViewModel(application)
     private val motionController = MotionSensorController(application)
     private val motionEstimator = MotionArtifactEstimator()
     private val calibrationManager = DeviceCalibrationManager(application)
+    private val sensorZloStore = SensorZloStore(application)
     private var beatFeedback = BeatFeedbackController(application)
 
     private var pipeline: PpgPipeline? = null
@@ -50,6 +54,10 @@ class MonitorViewModel(application: Application) : AndroidViewModel(application)
     private var auditTrail: AuditTrail? = null
     private var processingJob: Job? = null
     private var motionJob: Job? = null
+
+    private val zloHarvestActive = AtomicBoolean(false)
+    private val zloHarvestLock = Any()
+    private val zloHarvestRgb = mutableListOf<Triple<Double, Double, Double>>()
 
     private val _reading = MutableStateFlow(VitalReading())
     val reading: StateFlow<VitalReading> = _reading.asStateFlow()
@@ -93,12 +101,61 @@ class MonitorViewModel(application: Application) : AndroidViewModel(application)
     private val _feedbackVibrationOn = MutableStateFlow(true)
     val feedbackVibrationOn: StateFlow<Boolean> = _feedbackVibrationOn.asStateFlow()
 
+    private val _sensorZloStatus = MutableStateFlow("")
+    val sensorZloStatus: StateFlow<String> = _sensorZloStatus.asStateFlow()
+
     fun setFeedbackAudio(enabled: Boolean) {
         _feedbackAudioOn.value = enabled
     }
 
     fun setFeedbackVibration(enabled: Boolean) {
         _feedbackVibrationOn.value = enabled
+    }
+
+    private fun applyResolvedSensorZlo(cameraId: String) {
+        val dm = calibrationManager.currentDeviceModel()
+        val persisted = sensorZloStore.load(dm, cameraId)
+        when {
+            persisted != null -> {
+                camera.configureSensorZlo(persisted.zloR, persisted.zloG, persisted.zloB, "persistido")
+                _sensorZloStatus.value =
+                    "ZLO persistido (${if (persisted.captured) "captura oscura" else "archivo"}) " +
+                        "mediana R=${"%.2f".format(persisted.zloR)} G=${"%.2f".format(persisted.zloG)} " +
+                        "B=${"%.2f".format(persisted.zloB)} [n=${persisted.framesUsed}]"
+            }
+
+            else -> {
+                val lit = LiteratureZloFallback.forCurrentDevice()
+                camera.configureSensorZlo(lit.r, lit.g, lit.b, "literatura_wang2023_fallback")
+                _sensorZloStatus.value =
+                    "ZLO inicial ancla literatura (${"%.2f".format(lit.r)} digital/canal)" +
+                        " — capture datos oscuros para mejorar modelo."
+            }
+        }
+    }
+
+    /** Inicia colección (~2 s quietos): tapón opaco mismo flash táctico, sin pulso fisiológico. */
+    fun startSensorZloDarkHarvest() {
+        if (!_running.value) return
+        zloHarvestActive.set(true)
+        synchronized(zloHarvestLock) { zloHarvestRgb.clear() }
+        _sensorZloStatus.value =
+            "ZLO oscuro: mantenga lámina opaca FIRME sobre LED+lente sin movimiento; esperando muestras…"
+        auditTrail?.log(System.nanoTime(), MeasurementEvent.Kind.ZLO_CAPTURE_START, "ZLO_CAPTURE_START")
+    }
+
+    fun abortSensorZloDarkHarvest() {
+        zloHarvestActive.set(false)
+        synchronized(zloHarvestLock) { zloHarvestRgb.clear() }
+        _sensorZloStatus.value = "Captura ZLO cancelada."
+    }
+
+    /** Borra archivo ZLO este dispositivo/cámara y vuelve a ancla Wang heurística. */
+    fun revertSensorZloToLiterature() {
+        val cid = _cameraConfig.value?.cameraId ?: return
+        sensorZloStore.clear(calibrationManager.currentDeviceModel(), cid)
+        applyResolvedSensorZlo(cid)
+        snapshotSensorZloToSession()
     }
 
     fun start() {
@@ -116,6 +173,8 @@ class MonitorViewModel(application: Application) : AndroidViewModel(application)
                 _capabilities.value = camera.currentCapabilities()
                 val tf = cfg.targetFpsRange.second.coerceAtLeast(15)
 
+                applyResolvedSensorZlo(cfg.cameraId)
+
                 val s = MeasurementSession(
                     sessionId = UUID.randomUUID().toString(),
                     startEpochMs = System.currentTimeMillis(),
@@ -132,12 +191,14 @@ class MonitorViewModel(application: Application) : AndroidViewModel(application)
                 s.iso = cfg.manualIso
                 s.frameDurationNs = cfg.manualFrameDurationNs
                 s.targetFps = tf
+                s.ispAcquisitionSummary = cfg.ispAcquisitionSummary
 
                 session = s
+                snapshotSensorZloToSession()
                 val trail = AuditTrail(s).also { auditTrail = it }
                 trail.log(
                     System.nanoTime(), MeasurementEvent.Kind.SESSION_START,
-                    "camera=${cfg.cameraId} fps=$tf manual=${cfg.manualControlApplied}"
+                    "camera=${cfg.cameraId} fps=$tf manual=${cfg.manualControlApplied} isp=${cfg.ispAcquisitionSummary}"
                 )
 
                 val pipe = PpgPipeline(sampleRateHz = tf.toDouble(), auditTrail = trail)
@@ -152,6 +213,8 @@ class MonitorViewModel(application: Application) : AndroidViewModel(application)
 
                 processingJob = camera.frameFlow
                     .onEach { raw ->
+                        harvestSensorZloIfNeeded(raw)
+
                         val motion = _motionScore.value
                         val acq = PpgPipeline.AcquisitionMetrics(
                             frameDrops = camera.frameDropCount(),
@@ -195,11 +258,77 @@ class MonitorViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    private fun harvestSensorZloIfNeeded(raw: PpgSample) {
+        if (!zloHarvestActive.get()) return
+        if (raw.clippingHighRatio > 0.105 || raw.clippingLowRatio > 0.31) return
+        if (raw.motionScoreOptical > 0.069) return
+        synchronized(zloHarvestLock) {
+            zloHarvestRgb +=
+                Triple(
+                    raw.roiMeanPreZloRed,
+                    raw.roiMeanPreZloGreen,
+                    raw.roiMeanPreZloBlue
+                )
+            if (zloHarvestRgb.size > 320) zloHarvestRgb.removeAt(0)
+            val nReq = 56
+            if (zloHarvestRgb.size >= nReq) finalizeZloHarvest(nReq)
+        }
+    }
+
+    private fun finalizeZloHarvest(used: Int) {
+        synchronized(zloHarvestLock) {
+            val chunk = zloHarvestRgb.takeLast(used)
+            val mr = median(chunk.map { it.first })
+            val mg = median(chunk.map { it.second })
+            val mb = median(chunk.map { it.third })
+            val cid = _cameraConfig.value?.cameraId ?: return
+            sensorZloStore.save(
+                deviceModel = calibrationManager.currentDeviceModel(),
+                cameraId = cid,
+                r = mr,
+                g = mg,
+                b = mb,
+                framesUsed = used,
+                fromInstrumentedCapture = true
+            )
+            camera.configureSensorZlo(mr, mg, mb, "captura_oscura_campo")
+            zloHarvestActive.set(false)
+            zloHarvestRgb.clear()
+            _sensorZloStatus.value =
+                "ZLO médiana guardada (${"%.2f".format(mr)}, ${"%.2f".format(mg)}, ${"%.2f".format(mb)}) " +
+                    "sobre $used fotogramas estáticos oscuros."
+            auditTrail?.log(
+                System.nanoTime(),
+                MeasurementEvent.Kind.ZLO_CAPTURE_OK,
+                "ZLO_CAPTURE_OK R=${mr} G=${mg} B=${mb} n=$used"
+            )
+            snapshotSensorZloToSession()
+        }
+    }
+
+    private fun snapshotSensorZloToSession() {
+        val z = camera.currentSensorZlo()
+        session?.apply {
+            sensorZloR = z.r.takeIf { it >= 1e-6 }
+            sensorZloG = z.g.takeIf { it >= 1e-6 }
+            sensorZloB = z.b.takeIf { it >= 1e-6 }
+            zloSourceNote = z.sourceBrief.take(96)
+        }
+    }
+
+    private fun median(vals: List<Double>): Double {
+        if (vals.isEmpty()) return 0.0
+        val s = vals.sorted()
+        val mid = s.size / 2
+        return if (s.size % 2 == 1) s[mid] else (s[mid - 1] + s[mid]) / 2.0
+    }
+
     fun stop() {
         processingJob?.cancel()
         processingJob = null
         motionJob?.cancel()
         motionJob = null
+        zloHarvestActive.set(false)
 
         val jitterSnap = camera.frameJitterEmaMs()
         val fpsSnap = camera.measuredFpsEmaHz()

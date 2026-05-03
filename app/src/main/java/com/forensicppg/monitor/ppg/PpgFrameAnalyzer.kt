@@ -8,18 +8,33 @@ import com.forensicppg.monitor.domain.RoiChannelStats
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
+/** Valores vigentes tras [configureSensorZlo] (solo lectura fuera del analyzer). */
+data class AppliedSensorZlo(
+    val r: Double,
+    val g: Double,
+    val b: Double,
+    val sourceBrief: String
+)
+
 /**
- * Extrae exclusivamente estadísticas físicas desde YUV 420 frames reales — sin sintetizar PPG.
- * Mantiene buffers cortos AC/DC y adapta tamaño ROI frente a estabilidad óptica.
+ * Extrae estadísticas físicas desde YUV 420. Aplica opcionalmente offsets tipo ZLO
+ * (DC digital por canal antes del pulsátil, Wang et al. 2023 / adaptación campo).
  */
 class PpgFrameAnalyzer(
     private val roiSelector: RoiSelector = RoiSelector(centerFraction = 0.58)
 ) {
+    private val zloLock = Any()
+    private var zloR = 0.0
+    private var zloG = 0.0
+    private var zloB = 0.0
+    /** literatura|captura|manual|ninguno — brevemente para auditoría */
+    private var zloDesc = "ninguno"
+
     private var prevMeanGreen = 0.0
 
-    /** Promedios de canal recientes (~6 s máximo a ~30 FPS). */
     private val rb = Rolling(PpgAcquisitionTuning.CHANNEL_ROLLING_CAPACITY)
     private val gb = Rolling(PpgAcquisitionTuning.CHANNEL_ROLLING_CAPACITY)
     private val bb = Rolling(PpgAcquisitionTuning.CHANNEL_ROLLING_CAPACITY)
@@ -28,9 +43,20 @@ class PpgFrameAnalyzer(
     private var stableRoiFrames = 0
     private var roiFractionAdaptive: Double = PpgAcquisitionTuning.ROI_FRACTION_LOOSE
 
-    /**
-     * [image]: YUV_420_888 cerrado externamente después.
-     */
+    fun configureSensorZlo(red: Double, green: Double, blue: Double, sourceBrief: String) {
+        synchronized(zloLock) {
+            zloR = red.coerceAtLeast(0.0)
+            zloG = green.coerceAtLeast(0.0)
+            zloB = blue.coerceAtLeast(0.0)
+            zloDesc = sourceBrief.take(48)
+        }
+    }
+
+    fun currentSensorZlo(): AppliedSensorZlo =
+        synchronized(zloLock) {
+            AppliedSensorZlo(zloR, zloG, zloB, zloDesc)
+        }
+
     fun analyze(
         image: Image,
         monotonicRealtimeNs: Long,
@@ -42,6 +68,17 @@ class PpgFrameAnalyzer(
         if (width <= 1 || height <= 1) return null
         val planes = image.planes
         if (planes.size < 3) return null
+
+        val zr: Double
+        val zg: Double
+        val zb: Double
+        val zBrief: String
+        synchronized(zloLock) {
+            zr = zloR
+            zg = zloG
+            zb = zloB
+            zBrief = zloDesc
+        }
 
         updateAdaptiveRoiFraction()
         val roi = roiSelector.pickRoi(width, height, roiFractionAdaptive)
@@ -67,28 +104,31 @@ class PpgFrameAnalyzer(
         var saturatedR = 0L
         var saturatedG = 0L
         var saturatedB = 0L
-        var sumR = 0L
-        var sumG = 0L
-        var sumB = 0L
+        var sumRPre = 0.0
+        var sumGPre = 0.0
+        var sumBPre = 0.0
+        var sumRCorr = 0.0
+        var sumGCorr = 0.0
+        var sumBCorr = 0.0
         var sumY = 0L
         var sumY2 = 0L
 
         val step = if (roi.width > PpgAcquisitionTuning.ROI_SUBSAMPLE_WIDE_THRESHOLD_PX) 2 else 1
         var cnt = 0L
-        var y = roi.y
-        while (y < roi.y + roi.height) {
-            val uvY = y / 2
-            var x = roi.x
-            while (x < roi.x + roi.width) {
-                val uvX = x / 2
-                val yIdx = y * yRow + x * yPix
+        var yPixRow = roi.y
+        while (yPixRow < roi.y + roi.height) {
+            val uvY = yPixRow / 2
+            var xPix = roi.x
+            while (xPix < roi.x + roi.width) {
+                val uvX = xPix / 2
+                val yIdx = yPixRow * yRow + xPix * yPix
                 val uIdx = uvY * uRow + uvX * uPix
                 val vIdx = uvY * vRow + uvX * vPix
                 if (yIdx < 0 || yIdx >= yBuf.capacity() ||
                     uIdx < 0 || uIdx >= uBuf.capacity() ||
                     vIdx < 0 || vIdx >= vBuf.capacity()
                 ) {
-                    x += step
+                    xPix += step
                     continue
                 }
                 val yv = yBuf.get(yIdx).toInt() and 0xFF
@@ -99,33 +139,48 @@ class PpgFrameAnalyzer(
                 val g = (yv - 0.344136 * uu - 0.714136 * vv).toInt().coerceIn(0, 255)
                 val b = (yv + 1.772 * uu).toInt().coerceIn(0, 255)
 
-                hr[r]++; hg[g]++; hb[b]++
                 if (yv >= 250 || r >= 250 || g >= 250 || b >= 250) clipHighRgb++
                 if (yv <= 5 || r <= 5 || g <= 5 || b <= 5) clipLowRgb++
                 if (r >= 246) saturatedR++
                 if (g >= 246) saturatedG++
                 if (b >= 246) saturatedB++
 
-                sumR += r
-                sumG += g
-                sumB += b
+                val dr = (r.toDouble() - zr).coerceIn(0.12, 255.93)
+                val dg = (g.toDouble() - zg).coerceIn(0.12, 255.93)
+                val db = (b.toDouble() - zb).coerceIn(0.12, 255.93)
+                val cr = dr.roundToInt().coerceIn(0, 255)
+                val cg = dg.roundToInt().coerceIn(0, 255)
+                val cb = db.roundToInt().coerceIn(0, 255)
+
+                hr[cr]++; hg[cg]++; hb[cb]++
+
+                sumRPre += r
+                sumGPre += g
+                sumBPre += b
+                sumRCorr += dr
+                sumGCorr += dg
+                sumBCorr += db
                 sumY += yv
                 sumY2 += yv.toLong() * yv
                 cnt++
-                x += step
+                xPix += step
             }
-            y += step
+            yPixRow += step
         }
 
         if (cnt <= 0L) return null
 
         val n = cnt.toDouble()
-        val mr = sumR / n
-        val mg = sumG / n
-        val mb = sumB / n
-        val medianR = percentileFromHist(hr, cnt, 0.5).toDouble()
-        val medianG = percentileFromHist(hg, cnt, 0.5).toDouble()
-        val medianB = percentileFromHist(hb, cnt, 0.5).toDouble()
+        val mrPre = sumRPre / n
+        val mgPre = sumGPre / n
+        val mbPre = sumBPre / n
+        val mr = sumRCorr / n
+        val mg = sumGCorr / n
+        val mb = sumBCorr / n
+
+        val medianR = percentileFromHist(hr, n, 0.5).toDouble()
+        val medianG = percentileFromHist(hg, n, 0.5).toDouble()
+        val medianB = percentileFromHist(hb, n, 0.5).toDouble()
 
         val yMean = sumY / n
         val roiVar = (sumY2 / n) - (yMean * yMean)
@@ -185,9 +240,19 @@ class PpgFrameAnalyzer(
             roiVarianceLuma = roiVar.coerceAtLeast(0.0)
         )
 
+        val diagOut = exposureDiagnostics.copy(
+            sensorZloR = zr.takeIf { it >= 1e-6 },
+            sensorZloG = zg.takeIf { it >= 1e-6 },
+            sensorZloB = zb.takeIf { it >= 1e-6 },
+            zloSourceSummary = zBrief
+        )
+
         return PpgSample(
             timestampNs = image.timestamp,
             monotonicRealtimeNs = monotonicRealtimeNs,
+            roiMeanPreZloRed = mrPre,
+            roiMeanPreZloGreen = mgPre,
+            roiMeanPreZloBlue = mbPre,
             rawRed = mr,
             rawGreen = mg,
             rawBlue = mb,
@@ -197,7 +262,7 @@ class PpgFrameAnalyzer(
             clippingHighRatio = clipHR,
             clippingLowRatio = clipLR,
             motionScoreOptical = motionSmoothed,
-            exposureDiagnostics = exposureDiagnostics,
+            exposureDiagnostics = diagOut,
             lowLightSuspected = lowLight,
             sqi = 0.0,
             filteredSecondary = mr
@@ -217,11 +282,11 @@ class PpgFrameAnalyzer(
     }
 
     companion object {
-        private fun percentileFromHist(hist: IntArray, total: Long, p: Double): Int {
+        private fun percentileFromHist(hist: IntArray, total: Double, p: Double): Int {
             val target = (total * p).toLong().coerceAtLeast(0L)
             var cum = 0L
             for (i in hist.indices) {
-                cum += hist[i]
+                cum += hist[i].toLong()
                 if (cum >= target) return i
             }
             return 255
@@ -244,7 +309,6 @@ class PpgFrameAnalyzer(
         }
     }
 
-    /** Ventana FIFO para pulsátil rápido por canal sobre medias ROI. */
     private class Rolling(private val capacity: Int) {
         private val q = ArrayDeque<Double>(capacity + 2)
 
@@ -294,5 +358,4 @@ class PpgFrameAnalyzer(
             return (1.0 - cv / 6.0).coerceIn(0.05, 1.0)
         }
     }
-
 }

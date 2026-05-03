@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.ImageFormat
 import android.hardware.camera2.CameraCaptureSession
+import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
@@ -23,6 +24,7 @@ import android.util.Size
 import androidx.core.content.ContextCompat
 import com.forensicppg.monitor.domain.ExposureDiagnostics
 import com.forensicppg.monitor.domain.PpgSample
+import com.forensicppg.monitor.ppg.AppliedSensorZlo
 import com.forensicppg.monitor.ppg.PpgFrameAnalyzer
 import com.forensicppg.monitor.ppg.PpgAcquisitionTuning.FRAME_DROP_GAP_MULTIPLIER
 import com.forensicppg.monitor.ppg.PpgAcquisitionTuning.IMAGE_READER_MAX_IMAGES
@@ -56,7 +58,6 @@ class Camera2PpgController(private val context: Context) {
 
     private val drops = AtomicLong(0)
 
-    /** Última exposición/ISO vistas en [onCaptureCompleted] (prioritarias sobre estáticas sesión). */
     private var liveExposureNs: Long? = null
     private var liveIso: Int? = null
     private var liveFrameDurationNs: Long? = null
@@ -65,7 +66,6 @@ class Camera2PpgController(private val context: Context) {
     private var fpsEmaHz: Double = 0.0
     private var jitterEmaMs: Double = 0.0
 
-    /** Intervalo esperado último conocido (~ns/frame). */
     private var nominalFrameNs: Long = 33_333_333L
 
     val frameFlow: Flow<PpgSample> get() = frames
@@ -76,6 +76,12 @@ class Camera2PpgController(private val context: Context) {
     fun frameDropCount(): Long = drops.get()
     fun measuredFpsEmaHz(): Double = fpsEmaHz
     fun frameJitterEmaMs(): Double = jitterEmaMs
+
+    fun configureSensorZlo(red: Double, green: Double, blue: Double, sourceBrief: String) {
+        analyzer.configureSensorZlo(red, green, blue, sourceBrief)
+    }
+
+    fun currentSensorZlo(): AppliedSensorZlo = analyzer.currentSensorZlo()
 
     fun hasCameraPermission(): Boolean =
         ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
@@ -155,6 +161,15 @@ class Camera2PpgController(private val context: Context) {
         val manualApplied = ManualExposureController.apply(builder, caps, manualTarget)
         val torchOn = TorchController.apply(builder, caps, enabled = true)
 
+        val characteristics =
+            runCatching { cameraManager.getCameraCharacteristics(caps.cameraId) }.getOrNull()
+        val ispSummary =
+            if (characteristics != null) {
+                CapturePipelineTuner.applyBestEffort(characteristics, builder)
+            } else {
+                "isp_sin_characteristics"
+            }
+
         liveExposureNs = manualTarget?.exposureTimeNs
         liveIso = manualTarget?.iso
         liveFrameDurationNs = manualTarget?.frameDurationNs
@@ -171,7 +186,8 @@ class Camera2PpgController(private val context: Context) {
             manualIso = manualTarget?.iso,
             manualFrameDurationNs = manualTarget?.frameDurationNs,
             aeLocked = caps.supportsAeLock,
-            awbLocked = caps.supportsAwbLock
+            awbLocked = caps.supportsAwbLock,
+            ispAcquisitionSummary = ispSummary
         )
 
         val fpsChosen = fpsRange.upper.coerceAtLeast(fpsRange.lower).coerceAtLeast(15)
@@ -180,10 +196,6 @@ class Camera2PpgController(private val context: Context) {
                 ?: (1_000_000_000L / fpsChosen).coerceIn(12_500_000L, 166_666_666L)
             ).coerceIn(8_333_333L, 166_666_666L)
 
-        /*
-         * Registrar el listener después de tener [activeConfig] y [nominalFrameNs] coherentes:
-         * nunca usar acquireLatestImage — descarta cuadros y destruye el muestreo temporal del PPG.
-         */
         reader.setOnImageAvailableListener({ ir ->
             val cfg = activeConfig ?: return@setOnImageAvailableListener
             val hwNote =
@@ -216,7 +228,8 @@ class Camera2PpgController(private val context: Context) {
                         torchEnabled = cfg.torchEnabled,
                         hardwareLimitNote = hwNote,
                         aeLocked = cfg.aeLocked,
-                        awbLocked = cfg.awbLocked
+                        awbLocked = cfg.awbLocked,
+                        ispAcquisitionSummary = cfg.ispAcquisitionSummary
                     )
 
                     analyzer.analyze(img, SystemClock.elapsedRealtimeNanos(), diag)?.let {

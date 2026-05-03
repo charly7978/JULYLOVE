@@ -23,6 +23,8 @@ data class MeasurementEvent(
         EXPORT,
         SESSION_START,
         SESSION_END,
+        ZLO_CAPTURE_START,
+        ZLO_CAPTURE_OK,
         ERROR
     }
 }
