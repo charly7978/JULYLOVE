@@ -2,7 +2,31 @@
 
 > **Subidos manualmente** sólo para descarga rápida desde la PR. El `.gitignore` global del repo ignora `*.apk`; aquí se hace excepción.
 
-## ForensicPPG-debug-v4-safe-mode-37b3.apk (RECOMENDADO)
+## ForensicPPG-debug-v5-camera-npe-fix-37b3.apk (RECOMENDADO)
+
+- Tamaño: 9.8 MB
+- SHA-256: `330f5703a559553ed4d54ba137d8ef26a566ca4cb4bccf276c198a9b09025f0b`
+
+Arregla el crash detectado en TCL T803E (Android 15):
+
+```
+java.lang.NullPointerException: Attempt to invoke virtual method
+'void android.media.Image.close()' on a null object reference
+at Camera2PpgController.kt:244 (thread: ppg-camera2)
+```
+
+`ImageReader.acquireNextImage()` puede devolver **null** legalmente cuando el reader se queda momentáneamente sin imágenes (la API doc lo dice: "Returns: latest frame of image data, or null if no image data is available"). El v4 hacía `img.close()` en un `finally` con `img` no-nullable → NPE.
+
+**Crítico**: el callback corre en `HandlerThread "ppg-camera2"`, FUERA de cualquier corrutina. Por eso el `CoroutineExceptionHandler` del v4 no podía interceptarlo. Solución:
+
+- `acquireNextImage()` tipado como nullable; si es null, `return` limpio.
+- Procesamiento de imagen extraído a `drainReader(ir)` con `try/catch` interno.
+- El callback completo envuelto en `try/catch` que reporta no-fatal.
+- `analyzer.analyze()` también en `try/catch` propio.
+- `img.close()` en `runCatching`.
+- `onCaptureCompleted` (otro callback fuera de corrutina) también blindado.
+
+## ForensicPPG-debug-v4-safe-mode-37b3.apk
 
 - Tamaño: 9.8 MB
 - SHA-256: `c6de8e838b5f140b7d9be314458e7648c31be08feafe787654e2349400ebf28a`
