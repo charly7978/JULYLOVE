@@ -22,9 +22,6 @@ import com.forensicppg.monitor.pipeline.PpgPipeline
 import com.forensicppg.monitor.ppg.CalibrationPoint
 import com.forensicppg.monitor.ppg.CalibrationProfile
 import com.forensicppg.monitor.ppg.DeviceCalibrationManager
-import com.forensicppg.monitor.ppg.LiteratureZloFallback
-import com.forensicppg.monitor.ppg.RoiGeometryPreset
-import com.forensicppg.monitor.ppg.RoiGeometryStore
 import com.forensicppg.monitor.ppg.SensorZloStore
 import com.forensicppg.monitor.sensors.MotionArtifactEstimator
 import com.forensicppg.monitor.sensors.MotionSensorController
@@ -49,7 +46,6 @@ class MonitorViewModel(application: Application) : AndroidViewModel(application)
     private val motionEstimator = MotionArtifactEstimator()
     private val calibrationManager = DeviceCalibrationManager(application)
     private val sensorZloStore = SensorZloStore(application)
-    private val roiGeometryStore = RoiGeometryStore(application)
     private var beatFeedback = BeatFeedbackController(application)
 
     private var pipeline: PpgPipeline? = null
@@ -107,20 +103,6 @@ class MonitorViewModel(application: Application) : AndroidViewModel(application)
     private val _sensorZloStatus = MutableStateFlow("")
     val sensorZloStatus: StateFlow<String> = _sensorZloStatus.asStateFlow()
 
-    private val _roiGeometryPreset = MutableStateFlow(RoiGeometryPreset.defaultResolved())
-    val roiGeometryPreset: StateFlow<RoiGeometryPreset> = _roiGeometryPreset.asStateFlow()
-
-    fun setRoiGeometryPreset(preset: RoiGeometryPreset) {
-        val cid = _cameraConfig.value?.cameraId ?: return
-        val dm = calibrationManager.currentDeviceModel()
-        roiGeometryStore.save(dm, cid, preset)
-        _roiGeometryPreset.value = preset
-        if (_running.value) {
-            camera.configureRoiGeometryPreset(preset)
-            session?.roiGeometryPresetId = preset.presetId
-        }
-    }
-
     fun setFeedbackAudio(enabled: Boolean) {
         _feedbackAudioOn.value = enabled
     }
@@ -142,21 +124,12 @@ class MonitorViewModel(application: Application) : AndroidViewModel(application)
             }
 
             else -> {
-                val lit = LiteratureZloFallback.forCurrentDevice()
-                camera.configureSensorZlo(lit.r, lit.g, lit.b, "literatura_wang2023_fallback")
+                camera.configureSensorZlo(0.0, 0.0, 0.0, "sin_zlo_use_captura_oscura")
                 _sensorZloStatus.value =
-                    "ZLO inicial ancla literatura (${"%.2f".format(lit.r)} digital/canal)" +
-                        " — capture datos oscuros para mejorar modelo."
+                    "Sin ZLO guardado — pulsá «Captura ZLO oscuro» con tapa opaca (LED+lente) " +
+                        "o los offsets literatura **no** se usan en runtime."
             }
         }
-    }
-
-    private fun applyResolvedRoiGeometry(cameraId: String) {
-        val dm = calibrationManager.currentDeviceModel()
-        val presetId = roiGeometryStore.loadPresetId(dm, cameraId)
-        val preset = RoiGeometryPreset.fromPersistedId(presetId)
-        _roiGeometryPreset.value = preset
-        camera.configureRoiGeometryPreset(preset)
     }
 
     /** Inicia colección (~2 s quietos): tapón opaco mismo flash táctico, sin pulso fisiológico. */
@@ -175,8 +148,8 @@ class MonitorViewModel(application: Application) : AndroidViewModel(application)
         _sensorZloStatus.value = "Captura ZLO cancelada."
     }
 
-    /** Borra archivo ZLO este dispositivo/cámara y vuelve a ancla Wang heurística. */
-    fun revertSensorZloToLiterature() {
+    /** Borra ZLO persistido; runtime vuelve a offsets nulos hasta nueva captura. */
+    fun clearPersistedSensorZlo() {
         val cid = _cameraConfig.value?.cameraId ?: return
         sensorZloStore.clear(calibrationManager.currentDeviceModel(), cid)
         applyResolvedSensorZlo(cid)
@@ -199,7 +172,6 @@ class MonitorViewModel(application: Application) : AndroidViewModel(application)
                 val tf = cfg.targetFpsRange.second.coerceAtLeast(15)
 
                 applyResolvedSensorZlo(cfg.cameraId)
-                applyResolvedRoiGeometry(cfg.cameraId)
 
                 val s = MeasurementSession(
                     sessionId = UUID.randomUUID().toString(),
@@ -207,7 +179,7 @@ class MonitorViewModel(application: Application) : AndroidViewModel(application)
                     deviceModel = "${Build.MANUFACTURER} ${Build.MODEL}",
                     androidSdk = Build.VERSION.SDK_INT,
                     appVersion = BuildConfig.VERSION_NAME,
-                    algorithmVersion = "ppg-monitor-v2"
+                    algorithmVersion = "ppg-monitor-v3"
                 )
                 s.cameraId = cfg.cameraId
                 s.physicalCameraId = cfg.physicalCameraId
@@ -218,7 +190,7 @@ class MonitorViewModel(application: Application) : AndroidViewModel(application)
                 s.frameDurationNs = cfg.manualFrameDurationNs
                 s.targetFps = tf
                 s.ispAcquisitionSummary = cfg.ispAcquisitionSummary
-                s.roiGeometryPresetId = _roiGeometryPreset.value.presetId
+                s.roiGeometryPresetId = "auto_centroid"
 
                 session = s
                 snapshotSensorZloToSession()
@@ -404,7 +376,7 @@ class MonitorViewModel(application: Application) : AndroidViewModel(application)
         val ratio =
             pipe.spo2Estimator.snapshotLastRatio()?.takeIf { it in 0.28..9.49 } ?: return
         if (r.validityState.ordinal < PpgValidityState.PPG_VALID.ordinal) return
-        if (r.sqi < 0.52 || r.motionScore > 0.28 || r.perfusionIndex < 52.9) return
+        if (r.sqi < 0.52 || r.motionScore > 0.18 || r.perfusionIndex < 52.9) return
         pendingCalibrationPoints += CalibrationPoint(
             capturedAtMs = System.currentTimeMillis(),
             referenceSpo2 = referenceSpo2,

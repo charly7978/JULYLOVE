@@ -23,9 +23,7 @@ import com.forensicppg.monitor.domain.PpgValidityState
 import com.forensicppg.monitor.domain.VitalReading
 
 /**
- * Guía única de contacto óptimo cPPG: **pulgar**, yema distal, centrado sobre **lente + flash**,
- * firme pero sin clipping. Referencias técnicas: revisión método contact-based smartphone PPG
- * y calibración cPPG (Front. Digit. Health 2023, Wang et al.).
+ * Guía única: índice, yema cubriendo lente + flash; estabilización 8–12 s.
  */
 @Composable
 fun FingerPlacementGuide(
@@ -45,7 +43,7 @@ fun FingerPlacementGuide(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                "CONTACTO ÓPTIMO — UNA SOLA POSICIÓN",
+                "POSICIÓN ÚNICA — DEDO ÍNDICE",
                 modifier = Modifier.weight(1f),
                 color = Color(0xFF22FFAA),
                 fontFamily = FontFamily.Monospace,
@@ -62,29 +60,15 @@ fun FingerPlacementGuide(
             }
         }
         Text(
-            "• Pulgar: yema (pulpa distal) centrada para cubrir el lente y el LED de flash; evita aristas donde entre luz ambiente.",
+            "Apoyá la yema del dedo índice cubriendo al mismo tiempo la lente trasera principal y el flash. " +
+                "Presión suave, constante, sin aplastar, sin mover. Esperá 8–12 segundos de estabilización.",
             color = Color(0xFFE8FFF4),
             fontFamily = FontFamily.Monospace,
             fontSize = 11.sp
         )
         Spacer(Modifier.height(6.dp))
         Text(
-            "• Si hay saturación u oscuridad extrema, ajusta presión lentamente hasta ver perfusión en la onda sin recortes.",
-            color = Color(0xFFB8D8CC),
-            fontFamily = FontFamily.Monospace,
-            fontSize = 11.sp
-        )
-        Spacer(Modifier.height(6.dp))
-        Text(
-            "• Cobrí flash + lente a la vez: en muchos equipos el LED está ligeramente hacia ARRIBA " +
-                "del centro físico — deslizá un poco el pulgar hasta notar pulsación en verde.",
-            color = Color(0xFFB8D8CC),
-            fontFamily = FontFamily.Monospace,
-            fontSize = 11.sp
-        )
-        Spacer(Modifier.height(6.dp))
-        Text(
-            "• Apoya brazo y teléfono; evita mover el dedo hasta que BPM y la forma de onda se estabilicen (típicamente ~10–25 s a ~30 FPS en protocolos de literatura revisada).",
+            "Brazo apoyado a la altura del corazón; sin objetos ni superficies frente al sensor.",
             color = Color(0xFFB8D8CC),
             fontFamily = FontFamily.Monospace,
             fontSize = 11.sp
@@ -92,39 +76,52 @@ fun FingerPlacementGuide(
     }
 }
 
-/** Pistas en vivo mientras hay captura — menos error de uso. */
 @Composable
 fun FingerContactCoach(reading: VitalReading, modifier: Modifier = Modifier) {
     val motion = reading.motionScore.coerceIn(0.0, 1.08)
     val motionHint = when {
-        motion > 0.56 -> Triple("MOVIM.", "Alto — apoyo doble del teléfono o codera.", Color(0xFFFF5577))
-        motion > 0.34 -> Triple("MOVIM.", "Moderado — congelá 12–20 s sin deslizar el dedo.", Color(0xFFFFCC44))
-        else -> Triple("MOVIM.", "Estable.", Color(0xFF66DDAA))
+        motion >= 0.20 -> Triple("MOV.", "Alto — teléfono y dedo quietos.", Color(0xFFFF5577))
+        motion > 0.12 -> Triple("MOV.", "Moderado — sin deslizar la yema.", Color(0xFFFFCC44))
+        else -> Triple("MOV.", "Estable.", Color(0xFF66DDAA))
     }
     val pressHint = when {
         reading.clippingSuspectedHigh ->
             Triple(
-                "PRES.",
-                "Alto — aflojá la yema (clip / saturación bloqueando el pulsátil).",
+                "SAT.",
+                "Clip alto — aflojá presión.",
                 Color(0xFFFF5577)
             )
         reading.clippingSuspectedLow ->
             Triple(
-                "PRES.",
-                "Muy oscuro — apoyo firme sólo hasta ver ondas repetidas.",
+                "LUZ",
+                "Oscuro o sin flash útil — cubrir lente y flash juntos.",
                 Color(0xFFFFCC44)
             )
-        else -> Triple("PRES.", "Rango usable — microajustes lentos.", Color(0xFF66DDAA))
+        else -> Triple("SAT.", "Rango usable.", Color(0xFF66DDAA))
     }
     val signalHint = when (reading.validityState) {
         PpgValidityState.BIOMETRIC_VALID, PpgValidityState.PPG_VALID ->
-            Triple("SEÑAL", "PPG válido.", Color(0xFF44FFBB))
+            Triple("PPG", "Confirmado.", Color(0xFF44FFBB))
         PpgValidityState.PPG_CANDIDATE ->
-            Triple("SEÑAL", "Candidato — quedá quieto algunos fotogramas más.", Color(0xFFEEDD55))
-        PpgValidityState.RAW_OPTICAL_ONLY ->
-            Triple("SEÑAL", "Sólo óptico — centro yema cubriendo flash+lente junto.", Color(0xFFFF9933))
+            Triple("PPG", "Acumulando latidos…", Color(0xFFEEDD55))
+        PpgValidityState.QUIET_NO_PULSE ->
+            Triple("PPG", "Quieto pero sin pulso verificable.", Color(0xFFFF9933))
+        PpgValidityState.BAD_CONTACT ->
+            Triple("PPG", "Contacto insuficiente — índice sobre lente+flash.", Color(0xFFFF5577))
         PpgValidityState.NO_PHYSIOLOGICAL_SIGNAL ->
-            Triple("SEÑAL", "No tipo PPG — repetí cobertura sin huecos junto al LED.", Color(0xFFFF5577))
+            Triple("PPG", "NO_PPG — no hay perfil de dedo pulsátil.", Color(0xFFFF5577))
+        PpgValidityState.CLIPPING ->
+            Triple("PPG", "Saturación — menos presión.", Color(0xFFFF6644))
+        PpgValidityState.MOTION ->
+            Triple("PPG", "Movimiento — pausa y volver a colocar.", Color(0xFFFF5588))
+        PpgValidityState.LOW_LIGHT ->
+            Triple("PPG", "Luz baja — flash cubierto por la yema.", Color(0xFFFFAA44))
+        PpgValidityState.LOW_PERFUSION ->
+            Triple("PPG", "Perfusión baja — ajustá contacto.", Color(0xFFFFAA44))
+        PpgValidityState.SEARCHING ->
+            Triple("PPG", "Colocando dedo / buscando máscara estable.", Color(0xFFFFAA22))
+        PpgValidityState.RAW_OPTICAL_ONLY ->
+            Triple("PPG", "Óptico sin periodicidad cardíaca.", Color(0xFFFF9933))
     }
     Column(
         modifier = modifier
@@ -134,7 +131,7 @@ fun FingerContactCoach(reading: VitalReading, modifier: Modifier = Modifier) {
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                "ASISTENTE contacto ",
+                "Estado ",
                 color = Color(0xFFFFCC77),
                 fontFamily = FontFamily.Monospace,
                 fontSize = 10.sp,

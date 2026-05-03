@@ -13,7 +13,7 @@ object PpgAcquisitionTuning {
      * orden típico 5–15 ms citado para cPPG con LED en contacto cercano en
      * literatura reproducible sobre exposición controlada vs. modo estético.
      */
-    const val MANUAL_DESIRED_EXPOSURE_NS = 8_000_000L
+    const val MANUAL_DESIRED_EXPOSURE_NS = 6_000_000L
 
     /** Máximo de imágenes en cola antes de procesarlas; amortiza jitter del ISP. */
     const val IMAGE_READER_MAX_IMAGES = 14

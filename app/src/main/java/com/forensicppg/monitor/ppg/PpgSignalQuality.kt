@@ -1,8 +1,9 @@
 package com.forensicppg.monitor.ppg
 
-import kotlin.math.abs
-
-/** SQI combinado PSD + clipping + RR + autocorrelación/coherencia. */
+/**
+ * SQI duro: `PPG_VALID` exige pasar **todos** los subcriterios vía
+ * [PpgPhysiologyClassifier] usando el compositor y flags explícitos.
+ */
 class PpgSignalQuality {
 
     data class ComposerInput(
@@ -14,29 +15,43 @@ class PpgSignalQuality {
         val clippingLow: Double,
         val motionCombined01: Double,
         val rrCv: Double?,
-        val rrCount: Int
+        val rrCount: Int,
+        val maskCoverage: Double,
+        val maskSustained2s: Boolean,
+        val greenAcDc: Double,
+        val dominantInValidationBand: Boolean
     )
 
+    /**
+     * Retorna score [0,1] pero los **umbrales duros** se aplican en el clasificador;
+     * aquí se penaliza fuerte cualquier fallo duro.
+     */
     fun compose(ci: ComposerInput): Double {
-        val snr01 = ((ci.spectralSnrDb + 21.5) / 41.5).coerceIn(0.0, 1.0)
+        if (!ci.maskSustained2s || ci.maskCoverage < 0.70) return 0.0
+        if (ci.clippingHigh >= 0.08 || ci.clippingLow >= 0.05) return 0.0
+        if (ci.motionCombined01 >= 0.20) return 0.0
+        if (!ci.dominantInValidationBand) return 0.02
+        if (ci.spectralSnrDb < 6.0) return 0.05
+        if (ci.autocorr01 < 0.35) return 0.06
+        if (ci.coherenceRg < 0.22) return 0.07
+        if (ci.greenAcDc < 0.008 || ci.greenAcDc > 0.28) return 0.04
+
+        val snr01 = ((ci.spectralSnrDb - 6.0) / 24.0).coerceIn(0.0, 1.0)
         val heart01 = ci.spectralHeartFrac.coerceIn(0.0, 1.0)
-        val motionBounded = abs(ci.motionCombined01).coerceIn(0.0, 1.2)
-        val clipSum = ci.clippingHigh * 5.4 + ci.clippingLow * 3.6 + motionBounded * 1.88
-        val clipPenalty = clipSum.coerceIn(0.0, 7.0) / 7.0
+        val mask01 = ((ci.maskCoverage - 0.70) / 0.28).coerceIn(0.0, 1.0)
         val rr01 = when {
-            ci.rrCv != null && ci.rrCount >= 6 ->
-                (1.0 - ci.rrCv * 15.0).coerceIn(0.0, 1.0)
-            ci.rrCount <= 3 -> 0.32
-            else -> 0.68
+            ci.rrCv != null && ci.rrCount >= 7 ->
+                (1.0 - ci.rrCv * 12.0).coerceIn(0.0, 1.0)
+            ci.rrCount < 5 -> 0.15
+            else -> 0.45
         }
-        val wSum = 0.32 + 0.31 + 0.43 + 0.34 + 0.48
+        val wSum = 0.35 + 0.28 + 0.22 + 0.28 + 0.18 + 0.22
         val corr01 =
             (
-                0.32 * ci.autocorr01 + 0.31 * ci.coherenceRg + 0.43 * rr01 +
-                    0.34 * heart01 + 0.48 * snr01
+                0.35 * ci.autocorr01 + 0.28 * ci.coherenceRg + 0.22 * rr01 +
+                    0.28 * heart01 + 0.18 * snr01 + 0.22 * mask01
                 ) / wSum
-        val weighted = corr01 - clipPenalty.coerceIn(0.32, 0.93)
-        return weighted.coerceIn(0.0, 1.0)
+        return corr01.coerceIn(0.0, 1.0)
     }
 
     enum class SqBand { EXCELLENT, ACCEPTABLE, DEGRADED, INVALID }

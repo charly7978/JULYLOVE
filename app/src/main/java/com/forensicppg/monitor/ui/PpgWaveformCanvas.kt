@@ -100,6 +100,16 @@ private fun DrawScope.drawGrid() {
 }
 
 private fun DrawScope.drawWave(ring: WaveRing, windowSeconds: Double) {
+    if (!ring.lastWaveformDisplayAllowed()) {
+        val cy = size.height / 2f
+        drawLine(
+            color = Color(0x668899AA),
+            start = androidx.compose.ui.geometry.Offset(0f, cy),
+            end = androidx.compose.ui.geometry.Offset(size.width, cy),
+            strokeWidth = 1.4f
+        )
+        return
+    }
     val n = ring.size()
     if (n < 2) return
     val first = ring.at(0) ?: return
@@ -135,6 +145,7 @@ private fun DrawScope.drawWave(ring: WaveRing, windowSeconds: Double) {
 }
 
 private fun DrawScope.drawBeats(beatBuf: BeatRing, ring: WaveRing, windowSeconds: Double) {
+    if (!ring.lastWaveformDisplayAllowed()) return
     val n = ring.size()
     if (n < 2) return
     val last = ring.at(n - 1) ?: return
@@ -181,7 +192,14 @@ private class WaveRing(capacity: Int) {
     private val arr = arrayOfNulls<PpgSample>(capacity)
     private var head = 0
     private var filled = 0
-    fun push(s: PpgSample) { arr[head] = s; head = (head + 1) % arr.size; if (filled < arr.size) filled++ }
+    private var lastWaveAllowed = false
+    fun push(s: PpgSample) {
+        lastWaveAllowed = s.waveformDisplayAllowed
+        arr[head] = s
+        head = (head + 1) % arr.size
+        if (filled < arr.size) filled++
+    }
+    fun lastWaveformDisplayAllowed(): Boolean = lastWaveAllowed
     fun size(): Int = filled
     fun at(i: Int): PpgSample? {
         if (i >= filled) return null

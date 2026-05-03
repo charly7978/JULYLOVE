@@ -1,13 +1,19 @@
 package com.forensicppg.monitor.domain
 
 /**
- * Clasificación fisiológica de la ventana observada — no bloquea la captura
- * óptica: la UI indica nivel de evidencia disponible para métricas biomédicas.
+ * Estado evidencial de la ventana (orden: peor → mejor para comparación `>=`).
  */
 enum class PpgValidityState(val labelEs: String) {
+    SEARCHING("BUSCANDO SEÑAL"),
+    BAD_CONTACT("CONTACTO INSUFICIENTE"),
+    LOW_LIGHT("LUZ BAJA / FLASH ÚTIL"),
+    CLIPPING("SATURACIÓN / RECORTE"),
+    MOTION("MOVIMIENTO"),
+    LOW_PERFUSION("PERFUSIÓN BAJA"),
+    QUIET_NO_PULSE("QUIETO SIN PULSO"),
     RAW_OPTICAL_ONLY("ÓPTICO CRUDO"),
-    NO_PHYSIOLOGICAL_SIGNAL("SIN COMPONENTE FISIOLÓGICO CONFIRMADO"),
+    NO_PHYSIOLOGICAL_SIGNAL("SIN PPG (NO_PPG)"),
     PPG_CANDIDATE("PPG CANDIDATO"),
-    PPG_VALID("PPG VÁLIDO"),
+    PPG_VALID("PPG CONFIRMADO"),
     BIOMETRIC_VALID("BIOMÉTRICO VÁLIDO")
 }

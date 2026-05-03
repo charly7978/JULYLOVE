@@ -15,8 +15,9 @@ import com.forensicppg.monitor.ppg.PpgSignalProcessor
 import com.forensicppg.monitor.ppg.PpgSignalQuality
 import com.forensicppg.monitor.ppg.RhythmAnalyzer
 import com.forensicppg.monitor.ppg.Spo2Estimator
+import kotlin.math.abs
 
-/** Orquesta única: muestra → DSP → clasificación evidencial → picos confirmados → SpO₂/HRV sólo válidos. */
+/** Cadena única: muestra → DSP → SQI duro → evidencia fisiológica → picos → vitales sólo con PPG_VALID. */
 class PpgPipeline(
     sampleRateHz: Double,
     @Suppress("unused") private val auditTrail: AuditTrail? = null
@@ -45,8 +46,18 @@ class PpgPipeline(
 
     val spo2Estimator: Spo2Estimator = Spo2Estimator(sr, windowSeconds = 10.0)
 
+    private var pipelineStartMonoNs: Long? = null
+    private var maskGoodSinceMonoNs: Long? = null
+    private var lastContactScore = 0.0
+
     fun reset() {
-        dsp.reset(); rhythm.reset(); peak.reset(); spo2Estimator.reset()
+        dsp.reset()
+        rhythm.reset()
+        peak.reset()
+        spo2Estimator.reset()
+        pipelineStartMonoNs = null
+        maskGoodSinceMonoNs = null
+        lastContactScore = 0.0
     }
 
     fun peakStats(): PpgPeakDetector.DetectorStats = peak.stats
@@ -57,17 +68,42 @@ class PpgPipeline(
         calibration: CalibrationProfile?,
         acq: AcquisitionMetrics
     ): Step {
+        val mono = ppg.monotonicRealtimeNs
+        if (pipelineStartMonoNs == null) pipelineStartMonoNs = mono
+
+        if (abs(ppg.contactScore - lastContactScore) > 0.30) {
+            dsp.reset()
+            rhythm.reset()
+            peak.reset()
+            spo2Estimator.reset()
+            maskGoodSinceMonoNs = null
+            pipelineStartMonoNs = mono
+        }
+        lastContactScore = ppg.contactScore
+
+        if (ppg.maskCoverage >= 0.70) {
+            if (maskGoodSinceMonoNs == null) maskGoodSinceMonoNs = mono
+        } else {
+            maskGoodSinceMonoNs = null
+        }
+        val maskSustained2s =
+            maskGoodSinceMonoNs != null && (mono - maskGoodSinceMonoNs!!) >= 2_000_000_000L
+
+        val stabilizationNs = 2_800_000_000L
+        val inStabilization =
+            pipelineStartMonoNs != null && (mono - pipelineStartMonoNs!!) < stabilizationNs
+
         spo2Estimator.push(ppg.rawRed, ppg.rawGreen, ppg.rawBlue)
 
         val dspOut = dsp.ingest(ppg)
         val spec = dspOut.spectrumSummary
+        val hzValOk = spec.dominantFreqHz in 0.70..3.5
 
         val fusedMotion = kotlin.math.min(
             1.0,
             kotlin.math.max(ppg.motionScoreOptical, imuMotion01.coerceIn(0.0, 1.0))
         )
 
-        /** Composición antes de nuevo RR (histograma tachograma estable) */
         val preRhythm = rhythm.summarize()
         val rrCvPre = preRhythm.coefficientVar
         val rrN = rhythm.rrIntervalCount()
@@ -82,7 +118,11 @@ class PpgPipeline(
                 clippingLow = ppg.clippingLowRatio,
                 motionCombined01 = fusedMotion,
                 rrCv = rrCvPre,
-                rrCount = rrN
+                rrCount = rrN,
+                maskCoverage = ppg.maskCoverage,
+                maskSustained2s = maskSustained2s,
+                greenAcDc = ppg.roiStats.greenAcDc,
+                dominantInValidationBand = hzValOk
             )
         )
 
@@ -91,51 +131,71 @@ class PpgPipeline(
             spectral = spec,
             opticalMotionSmoothed = fusedMotion.coerceAtMost(1.05),
             clippingHighRatio = ppg.clippingHighRatio,
-            roiRedDominance = ppg.roiStats.redDominanceRg,
-            greenAcDcBandEstimate = ppg.roiStats.greenAcDc
+            clippingLowRatio = ppg.clippingLowRatio,
+            maskCoverage = ppg.maskCoverage,
+            maskSustained2s = maskSustained2s,
+            peakConfirmedCount = peak.stats.confirmedSession,
+            rrIntervalCount = rrN,
+            roiFingerProfileScore = ppg.roiStats.fingerProfileScore(),
+            greenAcDcBandEstimate = ppg.roiStats.greenAcDc,
+            contactScore = ppg.contactScore
         )
 
         val beat = peak.onSample(
             timestampNs = ppg.timestampNs,
             filteredWave = dspOut.filteredWave,
+            derivativeWave = dspOut.derivativeSmoothed,
             sqiComposite = sqiValue,
             validityState = physiology,
-            opticalMotionSmoothed = fusedMotion.coerceAtMost(1.5)
+            opticalMotionSmoothed = fusedMotion.coerceAtMost(1.5),
+            maskCoverage = ppg.maskCoverage,
+            stabilizationActive = inStabilization
         )
         beat?.let { b ->
             rhythm.registerRr(b.rrIntervalMs, b.timestampNs, b.rhythmMarker)
         }
 
         val rhythmPost = rhythm.summarize()
-        val rrTail = rhythm.tachogramTail(18)
+        val rrTail = rhythm.tachogramTail(24)
         val rrMedianMs = rrTail.takeIf { it.size >= 4 }
             ?.sorted()
             ?.let { v -> v[v.size / 2] }
 
-        val enoughRrCount = rrTail.size >= 3 && peak.stats.confirmedSession >= 3
+        val ppgConfirmed =
+            physiology.ordinal >= PpgValidityState.PPG_VALID.ordinal &&
+                !inStabilization &&
+                maskSustained2s
+
+        val enoughRrCount =
+            ppgConfirmed &&
+                rrTail.size >= 5 &&
+                peak.stats.confirmedSession >= 5 &&
+                rrCvPre != null &&
+                rrCvPre < 0.14
+
         val bpmMedian =
-            rrMedianMs?.takeIf { enoughRrCount && it in 268.0..1900.0 }?.let { 60000.0 / it }
+            rrMedianMs?.takeIf { enoughRrCount && it in 300.0..1500.0 }?.let { 60000.0 / it }
         val bpmInstantRecent =
             rrTail.lastOrNull()
-                ?.takeIf { enoughRrCount && it in 268.0..1900.0 }
+                ?.takeIf { enoughRrCount && it in 300.0..1500.0 }
                 ?.let { rr -> 60000.0 / rr }
 
         val bpmConfidence = when {
             !enoughRrCount -> 0.0
             else ->
                 (
-                    (sqiValue * 0.58) +
+                    (sqiValue * 0.62) +
                         (
                             (1.0 - ((rhythmPost.irregularityIx ?: 0.6).coerceIn(0.0, 3.5) / 3.5))
-                                .coerceIn(0.0, 1.0) * 0.42
+                                .coerceIn(0.0, 1.0) * 0.38
                             )
                     ).coerceIn(0.0, 1.0)
         }
 
-        /** SpO₂ clínica sólo con evidencia y calibración presente según clasificador y estimador. */
+        val allowsDerivedVitals = physiology.ordinal >= PpgValidityState.PPG_VALID.ordinal && ppgConfirmed
+
         val allowsClinicalOximetry =
-            physiology.ordinal >= PpgValidityState.PPG_VALID.ordinal &&
-                calibration != null && sqiValue >= 0.48
+            allowsDerivedVitals && calibration != null && sqiValue >= 0.52
 
         val piUse = (ppg.roiStats.perfusionIndexGreenPct / 100.0).coerceIn(0.0, 10.5)
 
@@ -149,29 +209,44 @@ class PpgPipeline(
                 clipHighRatio = ppg.clippingHighRatio
             )
 
-        val spoClinicalDisplay = spo.spo2Clinical?.takeIf { spo.clinicallyValidDisplay && spo.spo2Clinical != null }
+        val spoClinicalDisplay =
+            if (allowsDerivedVitals) {
+                spo.spo2Clinical?.takeIf { spo.clinicallyValidDisplay && spo.spo2Clinical != null }
+            } else {
+                null
+            }
 
-        /** Flags bitmask */
         var flags = ReadingValidity.OK
-        if (ppg.clippingHighRatio > 0.18) flags = flags or ReadingValidity.CLIPPING_HIGH
-        if (ppg.lowLightSuspected || ppg.clippingLowRatio > 0.22) flags = flags or ReadingValidity.CLIPPING_LOW
-        if (fusedMotion > 0.78) flags = flags or ReadingValidity.MOTION_HIGH
-        if (ppg.lowLightSuspected) flags = flags or ReadingValidity.NO_FINGER /* reutilizada como cue de baja luminosidad táctil */
-        if (!enoughRrCount || bpmMedian == null) flags = flags or ReadingValidity.NOT_ENOUGH_BEATS
-        if (calibration == null && physiology.ordinal >= PpgValidityState.PPG_VALID.ordinal) {
-            flags = flags or ReadingValidity.CALIBRATION_MISSING
-        }
+        if (ppg.clippingHighRatio >= 0.08) flags = flags or ReadingValidity.CLIPPING_HIGH
+        if (ppg.clippingLowRatio >= 0.05) flags = flags or ReadingValidity.CLIPPING_LOW
+        if (fusedMotion >= 0.20) flags = flags or ReadingValidity.MOTION_HIGH
+        if (ppg.lowLightSuspected) flags = flags or ReadingValidity.NO_FINGER
+        if (!enoughRrCount) flags = flags or ReadingValidity.NOT_ENOUGH_BEATS
+        if (allowsDerivedVitals && calibration == null) flags = flags or ReadingValidity.CALIBRATION_MISSING
         if (physiology.ordinal < PpgValidityState.PPG_VALID.ordinal) flags = flags or ReadingValidity.SIGNAL_INCOHERENT
 
-        val tachySus = rhythmPost.meanMs != null && rhythmPost.meanMs!! < 514.0
-        val bradySus = rhythmPost.meanMs != null && rhythmPost.meanMs!! > 1275.0
+        val tachySus =
+            allowsDerivedVitals && rhythmPost.meanMs != null && rhythmPost.meanMs!! < 514.0
+        val bradySus =
+            allowsDerivedVitals && rhythmPost.meanMs != null && rhythmPost.meanMs!! > 1275.0
         val pauseSus =
-            rrTail.lastOrNull()?.let { rr ->
-                rr > 1750 || beat?.rhythmMarker ==
-                    com.forensicppg.monitor.domain.BeatRhythmMarker.PAUSE_SUSPECT
-            } ?: false
+            allowsDerivedVitals &&
+                (
+                    rrTail.lastOrNull()?.let { rr ->
+                        rr > 1750 || beat?.rhythmMarker ==
+                            com.forensicppg.monitor.domain.BeatRhythmMarker.PAUSE_SUSPECT
+                    } ?: false
+                    )
 
-        val msgPrimary = composeMessage(physiology, flags, fusedMotion, calibration, enoughRrCount, spoClinicalDisplay)
+        val msgPrimary = composeMessage(
+            physiology,
+            fusedMotion,
+            allowsDerivedVitals,
+            enoughRrCount,
+            spoClinicalDisplay,
+            inStabilization,
+            maskSustained2s
+        )
 
         val ex = ppg.exposureDiagnostics
         val diag = DiagnosticsSnapshot(
@@ -199,12 +274,25 @@ class PpgPipeline(
         )
 
         val hypo =
-            hypertensionHint(bpmMedian, rhythmPost, ppg.roiStats.perfusionIndexGreenPct, sqiValue)
+            if (allowsDerivedVitals) {
+                hypertensionHint(bpmMedian, rhythmPost, ppg.roiStats.perfusionIndexGreenPct, sqiValue)
+            } else {
+                null
+            }
+
+        val showWave =
+            physiology.ordinal >= PpgValidityState.PPG_VALID.ordinal &&
+                maskSustained2s &&
+                !inStabilization &&
+                sqiValue >= 0.48
+
+        val displayWaveOut = if (showWave) dspOut.displaySmoothed else 0.0
 
         val sampleOut =
             ppg.copy(
                 filteredPrimary = dspOut.filteredWave,
-                displayWave = dspOut.displaySmoothed,
+                displayWave = displayWaveOut,
+                waveformDisplayAllowed = showWave,
                 sqi = sqiValue,
                 filteredSecondary = null
             )
@@ -214,39 +302,42 @@ class PpgPipeline(
         return Step(
             sample = sampleOut,
             reading = VitalReading(
-                bpmInstant = if (enoughRrCount) bpmInstantRecent?.coerceIn(44.0, 229.0) else null,
-                bpmSmoothed = if (enoughRrCount) bpmMedian?.coerceIn(44.0, 218.9) else null,
+                bpmInstant = if (enoughRrCount) bpmInstantRecent?.coerceIn(42.0, 200.0) else null,
+                bpmSmoothed = if (enoughRrCount) bpmMedian?.coerceIn(42.0, 200.0) else null,
                 bpmAverage = if (enoughRrCount) bpmMedian else null,
                 bpmConfidence = bpmConfidence,
                 beatsValidUsed = rrTail.size.coerceAtMost(240),
                 bpmWindowSeconds = (rrTail.size / sr).coerceAtMost(72.5),
                 spo2 = spoClinicalDisplay?.coerceAtMost(104.8),
                 spo2Confidence = if (spoClinicalDisplay != null) spo.spo2Confidence else 0.0,
-                spo2RatioR = spo.ratioOfRatios,
+                spo2RatioR = if (allowsDerivedVitals) spo.ratioOfRatios else null,
                 spo2CalibrationStatus = if (calibration == null) "NO_CALIBRADA" else "CALIBR_${calibration.calibrationSamples}pts",
-                spo2WindowSecondsUsed = 10.0,
+                spo2WindowSecondsUsed = if (allowsDerivedVitals) 10.0 else 0.0,
                 spo2ExperimentalIndex =
-                    spo.ratioOfRatios?.takeUnless { spo.clinicallyValidDisplay },
+                    if (allowsDerivedVitals) spo.ratioOfRatios?.takeUnless { spo.clinicallyValidDisplay } else null,
                 sqi = sqiValue,
                 snrBandDbEstimate = spec.snrHeartDbEstimate,
                 dominantHeartHz = spec.dominantFreqHz,
                 perfusionIndex = ppg.roiStats.perfusionIndexGreenPct,
-                motionScore = fusedMotion.coerceAtMost(1.3),
-                rrMs = rhythmPost.meanMs,
-                rrSdnnMs = rhythmPost.sdnn,
-                rmssdMs = rhythmPost.rmssd,
-                pnn50 = rhythmPost.pnn50,
-                irregularityCoefficient = rhythmPost.irregularityIx,
+                maskCoverage = ppg.maskCoverage,
+                contactScore = ppg.contactScore,
+                motionScore = fusedMotion.coerceAtMost(1.0),
+                rrMs = if (allowsDerivedVitals) rhythmPost.meanMs else null,
+                rrSdnnMs = if (allowsDerivedVitals) rhythmPost.sdnn else null,
+                rmssdMs = if (allowsDerivedVitals) rhythmPost.rmssd else null,
+                pnn50 = if (allowsDerivedVitals) rhythmPost.pnn50 else null,
+                irregularityCoefficient = if (allowsDerivedVitals) rhythmPost.irregularityIx else null,
                 beatsDetected = peak.stats.confirmedSession,
-                abnormalBeatCandidates = rhythmPost.ectopicSuspects,
+                abnormalBeatCandidates = if (allowsDerivedVitals) rhythmPost.ectopicSuspects else 0,
                 validityState = physiology,
                 validityFlags = flags,
                 rhythmPatternHint = rhythmPost.pattern,
                 tachySuspected = tachySus,
                 bradySuspected = bradySus,
                 pauseSuspected = pauseSus,
-                rrRecentMs = rrRecent,
-                irregularSegmentTimestampsNs = rhythm.irregularityTimestamps(),
+                rrRecentMs = if (allowsDerivedVitals) rrRecent else emptyList(),
+                irregularSegmentTimestampsNs =
+                    if (allowsDerivedVitals) rhythm.irregularityTimestamps() else emptyList(),
                 messagePrimary = msgPrimary,
                 hypertensionRisk = hypo,
                 peakConfirmations = peak.stats.confirmedSession,
@@ -254,11 +345,11 @@ class PpgPipeline(
                 rejectionTrace = peak.stats.rejectDigest,
                 diagnostics = diag,
                 lastRawWaveY = ppg.rawGreen,
-                lastFilteredWaveY = dspOut.displaySmoothed,
-                clippingSuspectedHigh = ppg.clippingHighRatio > 0.11,
-                clippingSuspectedLow = ppg.clippingLowRatio > 0.16
+                lastFilteredWaveY = if (showWave) dspOut.displaySmoothed else null,
+                clippingSuspectedHigh = ppg.clippingHighRatio >= 0.08,
+                clippingSuspectedLow = ppg.clippingLowRatio >= 0.05
             ),
-            confirmedBeat = beat
+            confirmedBeat = if (allowsDerivedVitals) beat else null
         )
     }
 
@@ -267,24 +358,30 @@ class PpgPipeline(
 
     private fun composeMessage(
         v: PpgValidityState,
-        flags: Int,
         motion: Double,
-        cal: CalibrationProfile?,
+        ppgOk: Boolean,
         enoughBpm: Boolean,
-        spoDisp: Double?
+        spoDisp: Double?,
+        stabilizing: Boolean,
+        mask2s: Boolean
     ): String {
-        if (flags and ReadingValidity.MOTION_HIGH != 0) return "Movimiento alto — reduzca sacudidas"
-        if (flags and ReadingValidity.CLIPPING_HIGH != 0) return "Saturación óptica / clip alto"
-        if (flags and ReadingValidity.CLIPPING_LOW != 0) return "Señal oscura — flash o contacto"
-        if (v == PpgValidityState.NO_PHYSIOLOGICAL_SIGNAL) return "Señal óptica no fisiológica (sin PPG confirmado)"
-        if (v == PpgValidityState.RAW_OPTICAL_ONLY) return "Óptico crudo — sin componente cardíaco verificable"
-        if (v == PpgValidityState.PPG_CANDIDATE) return "PPG candidato — acumulando evidencia de latidos"
-        if (!enoughBpm) return "BPM calculando — sin intervalos RR confirmados suficientes"
-        if (cal == null && spoDisp == null && v.ordinal >= PpgValidityState.PPG_VALID.ordinal)
-            return "SpO₂ requiere calibración contra oxímetro de referencia"
-        if (spoDisp == null && v.ordinal >= PpgValidityState.PPG_VALID.ordinal)
-            return "Índice ratio-of-ratios sólo experimental (no valor clínico)"
-        return "Monitor activo (${v.labelEs.lowercase()})"
+        if (stabilizing) return "Estabilizando contacto (2–3 s) — sin BPM aún"
+        if (motion >= 0.20) return "Movimiento — mantener dedo y teléfono quietos"
+        if (v == PpgValidityState.CLIPPING) return "Saturación — aflojá presión sobre lente/flash"
+        if (v == PpgValidityState.LOW_LIGHT) return "Luz/flash insuficiente — cubrir lente y flash juntos"
+        if (v == PpgValidityState.BAD_CONTACT) return "Contacto insuficiente — yema índice sobre lente+flash"
+        if (!mask2s) return "Mantener cobertura estable del dedo (máscara ≥70%)"
+        if (v == PpgValidityState.MOTION) return "Movimiento detectado"
+        if (v == PpgValidityState.QUIET_NO_PULSE) return "Quieto pero sin pulso cardíaco verificable"
+        if (v == PpgValidityState.NO_PHYSIOLOGICAL_SIGNAL) return "NO_PPG — objeto o superficie no fisiológica"
+        if (v == PpgValidityState.RAW_OPTICAL_ONLY) return "Óptico sin periodicidad cardíaca confirmada"
+        if (v == PpgValidityState.PPG_CANDIDATE) return "Acumulando latidos confirmados…"
+        if (!enoughBpm && ppgOk) return "PPG confirmado — calculando BPM (≥5 latidos)"
+        if (spoDisp == null && ppgOk)
+            return "SpO₂ requiere calibración con oxímetro de referencia"
+        if (v == PpgValidityState.PPG_VALID || v == PpgValidityState.BIOMETRIC_VALID)
+            return "PPG confirmado (${v.labelEs})"
+        return v.labelEs
     }
 
     private fun hypertensionHint(
