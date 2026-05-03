@@ -18,6 +18,7 @@ import com.forensicppg.monitor.forensic.AuditTrail
 import com.forensicppg.monitor.forensic.MeasurementEvent
 import com.forensicppg.monitor.forensic.MeasurementSession
 import com.forensicppg.monitor.forensic.SessionExporter
+import com.forensicppg.monitor.forensic.RoiAuditEvent
 import com.forensicppg.monitor.pipeline.PpgPipeline
 import com.forensicppg.monitor.ppg.CalibrationPoint
 import com.forensicppg.monitor.ppg.CalibrationProfile
@@ -103,6 +104,11 @@ class MonitorViewModel(application: Application) : AndroidViewModel(application)
     private val _sensorZloStatus = MutableStateFlow("")
     val sensorZloStatus: StateFlow<String> = _sensorZloStatus.asStateFlow()
 
+    private val _roiAuditTail = MutableStateFlow<List<RoiAuditEvent>>(emptyList())
+    val roiAuditTail: StateFlow<List<RoiAuditEvent>> = _roiAuditTail.asStateFlow()
+
+    private var lastRoiAuditEventCount = 0
+
     fun setFeedbackAudio(enabled: Boolean) {
         _feedbackAudioOn.value = enabled
     }
@@ -164,6 +170,8 @@ class MonitorViewModel(application: Application) : AndroidViewModel(application)
         beatFeedback = BeatFeedbackController(getApplication())
 
         _running.value = true
+        lastRoiAuditEventCount = 0
+        _roiAuditTail.value = emptyList()
         viewModelScope.launch {
             try {
                 val cfg = camera.start(targetFps = 30)
@@ -231,6 +239,14 @@ class MonitorViewModel(application: Application) : AndroidViewModel(application)
                             ses.framesTotal++
                             ses.framesAccepted++
                             ses.samples += step.sample
+
+                            val roiN = synchronized(ses.roiAuditEvents) { ses.roiAuditEvents.size }
+                            if (roiN != lastRoiAuditEventCount) {
+                                lastRoiAuditEventCount = roiN
+                                _roiAuditTail.value = synchronized(ses.roiAuditEvents) {
+                                    ses.roiAuditEvents.takeLast(16)
+                                }
+                            }
 
                             step.confirmedBeat?.let { b ->
                                 ses.beats += b
@@ -337,6 +353,10 @@ class MonitorViewModel(application: Application) : AndroidViewModel(application)
 
         _running.value = false
         session?.let { s ->
+            synchronized(s.roiAuditEvents) {
+                _roiAuditTail.value = s.roiAuditEvents.takeLast(16)
+                lastRoiAuditEventCount = s.roiAuditEvents.size
+            }
             s.endEpochMs = System.currentTimeMillis()
             val readings = s.samples.map { it.sqi }
             s.finalSqiMean = if (readings.isNotEmpty()) readings.average() else null
@@ -348,6 +368,9 @@ class MonitorViewModel(application: Application) : AndroidViewModel(application)
             s.fpsJitterMs = jitterSnap
             auditTrail?.log(System.nanoTime(), MeasurementEvent.Kind.SESSION_END,
                 "samples=${s.samples.size} beats=${s.beats.size}")
+        } ?: run {
+            _roiAuditTail.value = emptyList()
+            lastRoiAuditEventCount = 0
         }
     }
 
