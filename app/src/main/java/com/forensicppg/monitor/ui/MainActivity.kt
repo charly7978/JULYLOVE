@@ -6,7 +6,9 @@ import android.content.pm.PackageManager
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.background
@@ -49,6 +51,17 @@ class MainActivity : ComponentActivity() {
     ) { /* sin autostart: el usuario decide cuándo iniciar */ }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        runCatching {
+            // Edge-to-edge: hace que el fondo de barras de estado y nav sea
+            // transparente y la app dibuja debajo. Combinado con
+            // windowInsetsPadding(systemBars) en MonitorScreen el monitor
+            // OCUPA EL 100% del ancho/alto disponible. Andrioidx 1.9+ tiene
+            // enableEdgeToEdge() que es la forma correcta y a prueba de OEMs.
+            enableEdgeToEdge(
+                statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+                navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+            )
+        }
         super.onCreate(savedInstanceState)
         runCatching { window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
 

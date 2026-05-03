@@ -2,7 +2,25 @@
 
 > **Subidos manualmente** sólo para descarga rápida desde la PR. El `.gitignore` global del repo ignora `*.apk`; aquí se hace excepción.
 
-## ForensicPPG-debug-v5-camera-npe-fix-37b3.apk (RECOMENDADO)
+## ForensicPPG-debug-v6-icu-monitor-37b3.apk (RECOMENDADO)
+
+- Tamaño: 9.8 MB
+- SHA-256: `52ebc489e1fa9550fc966d9ccb70d6fa74b8fc5a3a6ef91703ee33b915ceb7ca`
+
+Rediseño completo de la pantalla principal estilo monitor médico ICU profesional, full-screen edge-to-edge:
+
+- `enableEdgeToEdge()` con barras de status/nav transparentes → la app dibuja en el 100 % del display.
+- `windowInsetsPadding(systemBars)` en `MonitorScreen` para respetar el notch sin perder área.
+- Sin paneles laterales con scroll. Sin chips de preset ROI ocupando espacio en la pantalla principal.
+- Layout vertical denso: status header → ondulación PPG (peso flexible, ocupa el grueso) → vital primario (HR/SpO₂/RR con números masivos) → 8 chips de métricas secundarias (SDNN, RMSSD, PI, MOV, SQI, FPS, RIT, CRIB) → línea de estado clínico → barra de control compacta.
+- HR con corazón pulsante animado al ritmo del BPM real publicado.
+- Indicador REC parpadeante en rojo cuando hay captura activa.
+- Reloj en tiempo real en la barra superior.
+- Onda PPG estilo osciloscopio médico (grilla 12×6 con líneas mayores cada 3 columnas / 2 filas, colores fosforescentes).
+
+Eliminados los componentes de UI redundantes: `FingerPlacementGuide.kt` (reemplazado por overlay full-screen `FingerPlacementOverlay`), `SignalQualityPanel`, `CameraDiagnosticsPanel`, `VitalTile`, `ArrhythmiaEventOverlay` (todos integrados inline en la nueva `MonitorScreen`).
+
+## ForensicPPG-debug-v5-camera-npe-fix-37b3.apk
 
 - Tamaño: 9.8 MB
 - SHA-256: `330f5703a559553ed4d54ba137d8ef26a566ca4cb4bccf276c198a9b09025f0b`
