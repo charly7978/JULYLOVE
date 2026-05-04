@@ -1,8 +1,20 @@
 package com.forensicppg.monitor.ppg
 
 /**
- * SQI duro: `PPG_VALID` exige pasar **todos** los subcriterios vía
- * [PpgPhysiologyClassifier] usando el compositor y flags explícitos.
+ * SQI duro: evalúa calidad de señal PPG con gates binarios estrictos.
+ *
+ * Para que `compose()` retorne un score utilizable (≥ 0.10), TODOS los
+ * subcriterios duros deben cumplirse simultáneamente:
+ *
+ *  - maskCoverage ≥ 0.70 sostenida ≥ 2 s
+ *  - clippingHigh < 0.08 y clippingLow < 0.05
+ *  - motionCombined < 0.20
+ *  - greenAcDc en rango útil [0.008, 0.28]
+ *  - SNR banda cardíaca ≥ 6 dB
+ *  - autocorrelación pulso ≥ 0.35
+ *  - dominante estable en 0.7–3.5 Hz
+ *  - coherencia R/G ≥ 0.22
+ *  - ≥ 5 latidos con RR fisiológico y CV razonable
  */
 class PpgSignalQuality {
 
@@ -23,19 +35,23 @@ class PpgSignalQuality {
     )
 
     /**
-     * Retorna score [0,1] pero los **umbrales duros** se aplican en el clasificador;
-     * aquí se penaliza fuerte cualquier fallo duro.
+     * Retorna score compuesto [0,1]. Gates duros retornan 0.0 inmediatamente;
+     * score > 0 solo si la señal tiene evidencia fisiológica real.
      */
     fun compose(ci: ComposerInput): Double {
+        // ── Gates duros binarios: fallo inmediato ──
         if (!ci.maskSustained2s || ci.maskCoverage < 0.70) return 0.0
         if (ci.clippingHigh >= 0.08 || ci.clippingLow >= 0.05) return 0.0
         if (ci.motionCombined01 >= 0.20) return 0.0
+
+        // ── Gates de evidencia fisiológica ──
         if (!ci.dominantInValidationBand) return 0.02
         if (ci.spectralSnrDb < 6.0) return 0.05
         if (ci.autocorr01 < 0.35) return 0.06
         if (ci.coherenceRg < 0.22) return 0.07
         if (ci.greenAcDc < 0.008 || ci.greenAcDc > 0.28) return 0.04
 
+        // ── Composición proporcional (todos los gates pasaron) ──
         val snr01 = ((ci.spectralSnrDb - 6.0) / 24.0).coerceIn(0.0, 1.0)
         val heart01 = ci.spectralHeartFrac.coerceIn(0.0, 1.0)
         val mask01 = ((ci.maskCoverage - 0.70) / 0.28).coerceIn(0.0, 1.0)
@@ -45,12 +61,17 @@ class PpgSignalQuality {
             ci.rrCount < 5 -> 0.15
             else -> 0.45
         }
+
         val wSum = 0.35 + 0.28 + 0.22 + 0.28 + 0.18 + 0.22
-        val corr01 =
-            (
-                0.35 * ci.autocorr01 + 0.28 * ci.coherenceRg + 0.22 * rr01 +
-                    0.28 * heart01 + 0.18 * snr01 + 0.22 * mask01
-                ) / wSum
+        val corr01 = (
+            0.35 * ci.autocorr01 +
+                0.28 * ci.coherenceRg +
+                0.22 * rr01 +
+                0.28 * heart01 +
+                0.18 * snr01 +
+                0.22 * mask01
+            ) / wSum
+
         return corr01.coerceIn(0.0, 1.0)
     }
 
