@@ -337,20 +337,20 @@ private fun pearson(x: DoubleArray, y: DoubleArray): Double {
 private fun autocorrStrength(x: DoubleArray, srHz: Double, nFftHint: Int): Double {
     val n = min(x.size, nFftHint)
     if (n < SPECTRAL_BOOTSTRAP_MIN_SAMPLES) return 0.0
+    // R(0) = energía total — normalización correcta
+    var r0 = 0.0
+    for (t in 0 until n) r0 += x[t] * x[t]
+    if (r0 < 1e-18) return 0.0
     val lagMin = max(4, ceil(srHz / 4.2).toInt().coerceAtMost(max(8, n / 8)))
     var lagMax = min(n / 3, ceil(srHz / 0.65).toInt()).coerceAtLeast(lagMin)
     lagMax = min(lagMax, max(lagMin, n / 3))
     var best = 0.0
     for (lag in lagMin..lagMax) {
         var acc = 0.0
-        var norm = 0.0
         for (t in lag until n) {
-            val v = x[t]
-            acc += v * x[t - lag]
-            norm += v * v
+            acc += x[t] * x[t - lag]
         }
-        if (norm < 1e-18) continue
-        val sc = abs(acc / sqrt(norm.coerceAtLeast(1e-12)))
+        val sc = abs(acc / r0)
         if (sc > best) best = sc
     }
     return best.coerceIn(0.0, 1.0)

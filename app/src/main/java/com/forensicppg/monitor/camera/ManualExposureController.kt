@@ -54,7 +54,7 @@ object ManualExposureController {
         }
         builder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_OFF)
         builder.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_OFF)
-        builder.set(CaptureRequest.CONTROL_AWB_MODE, CameraMetadata.CONTROL_AWB_MODE_INCANDESCENT)
+        builder.set(CaptureRequest.CONTROL_AWB_MODE, CameraMetadata.CONTROL_AWB_MODE_OFF)
         builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, target.exposureTimeNs)
         builder.set(CaptureRequest.SENSOR_SENSITIVITY, target.iso)
         builder.set(CaptureRequest.SENSOR_FRAME_DURATION, target.frameDurationNs)

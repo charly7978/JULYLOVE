@@ -211,7 +211,7 @@ class PpgPipeline(
 
         val spoClinicalDisplay =
             if (allowsDerivedVitals) {
-                spo.spo2Clinical?.takeIf { spo.clinicallyValidDisplay && spo.spo2Clinical != null }
+                spo.spo2Clinical?.takeIf { spo.clinicallyValidDisplay }
             } else {
                 null
             }

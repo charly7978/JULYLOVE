@@ -95,8 +95,8 @@ data class RoiChannelStats(
     fun fingerProfileScore(): Double {
         val rg = redDominanceRg
         val okRg = when {
-            rg in 1.02..1.85 -> 1.0
-            rg in 0.92..2.05 -> 0.55
+            rg in 1.01..1.90 -> 1.0
+            rg in 0.95..2.10 -> 0.55
             else -> 0.12
         }
         val gdc = greenAcDc.coerceIn(0.0, 0.35)

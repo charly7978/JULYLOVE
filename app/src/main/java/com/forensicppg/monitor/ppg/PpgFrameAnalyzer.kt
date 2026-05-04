@@ -317,10 +317,10 @@ class PpgFrameAnalyzer(
         var reject = ""
         when {
             coverageInitial < 0.18 -> reject = "dedo_parcial_o_sin_cobertura"
-            clipHR > 0.35 -> reject = "clipping_alto"
-            clipLR > 0.42 -> reject = "clipping_bajo"
-            redDominance < 0.92 || redDominance > 2.4 -> reject = "perfil_no_piel"
-            greenPulsatility < 0.004 && coverageInitial < 0.35 -> reject = "sin_pulsatilidad_evidente"
+            clipHR > 0.25 -> reject = "clipping_alto"
+            clipLR > 0.30 -> reject = "clipping_bajo"
+            redDominance < 0.95 || redDominance > 2.2 -> reject = "perfil_no_piel"
+            greenPulsatility < 0.003 && coverageInitial < 0.35 -> reject = "sin_pulsatilidad_evidente"
             contactScore < 0.22 -> reject = "contacto_insuficiente"
         }
 
@@ -416,18 +416,21 @@ class PpgFrameAnalyzer(
         return RgbY(r, g, b, yv)
     }
 
-    /** Perfil dedo bajo flash blanco: rojo dominante no saturado, verde útil, azul menor. */
+    /**
+     * Perfil dedo bajo flash blanco: rojo dominante no saturado, verde útil, azul menor.
+     * R/G ratio 1.01–1.90 cubre tonos de piel claros a oscuros bajo iluminación LED.
+     */
     private fun isFingerMaskPixel(yv: Int, r: Int, g: Int, b: Int, clipHigh: Boolean, clipLow: Boolean): Boolean {
         if (clipHigh || clipLow) return false
-        if (yv < 12 || yv > 248) return false
+        if (yv < 15 || yv > 248) return false
         val rf = r.toDouble()
         val gf = g.toDouble()
         val bf = b.toDouble()
-        if (rf < 28 || gf < 18) return false
-        if (bf > rf * 0.92) return false
+        if (rf < 30 || gf < 18) return false
+        if (bf > rf * 0.88) return false
         val rg = rf / max(gf, 1.0)
-        if (rg < 1.01 || rg > 1.72) return false
-        if (bf > gf * 0.95) return false
+        if (rg < 1.01 || rg > 1.90) return false
+        if (bf > gf * 0.92) return false
         return true
     }
 
