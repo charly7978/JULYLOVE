@@ -23,6 +23,7 @@ class SessionExporter(private val context: Context) {
         val samplesCsv: File,
         val beatsCsv: File,
         val eventsCsv: File,
+        val roiAuditCsv: File,
         val reportTxt: File,
         val integrityHashHex: String
     )
@@ -34,12 +35,14 @@ class SessionExporter(private val context: Context) {
         val samplesCsv = File(root, "samples.csv")
         val beatsCsv = File(root, "beats.csv")
         val eventsCsv = File(root, "events.csv")
+        val roiAuditCsv = File(root, "roi_audit.csv")
         val jsonFile = File(root, "session.json")
         val reportTxt = File(root, "report.txt")
 
         writeSamples(samplesCsv, session)
         writeBeats(beatsCsv, session)
         writeEvents(eventsCsv, session)
+        writeRoiAudit(roiAuditCsv, session)
         writeReport(reportTxt, session)
 
         val jsonNoHash = sessionJson(session).toString(2)
@@ -47,7 +50,7 @@ class SessionExporter(private val context: Context) {
         val finalJson = JSONObject(jsonNoHash).also { it.put("integrityHash", hash) }
         jsonFile.writeText(finalJson.toString(2))
 
-        return Exported(root, jsonFile, samplesCsv, beatsCsv, eventsCsv, reportTxt, hash)
+        return Exported(root, jsonFile, samplesCsv, beatsCsv, eventsCsv, roiAuditCsv, reportTxt, hash)
     }
 
     private fun sessionJson(s: MeasurementSession): JSONObject {
@@ -94,6 +97,19 @@ class SessionExporter(private val context: Context) {
             }
         }
         o.put("events", eventsArr)
+        val roiArr = JSONArray()
+        synchronized(s.roiAuditEvents) {
+            for (e in s.roiAuditEvents) {
+                roiArr.put(JSONObject().apply {
+                    put("timestampNs", e.timestampNs)
+                    put("edge", e.edge.name)
+                    put("channel", e.channel.name)
+                    put("summary", e.summary)
+                    put("payload", e.payload)
+                })
+            }
+        }
+        o.put("roiAuditEvents", roiArr)
         o.put("sampleCount", s.samples.size)
         o.put("beatCount", s.beats.size)
         return o
@@ -151,6 +167,20 @@ class SessionExporter(private val context: Context) {
         }
     }
 
+    private fun writeRoiAudit(f: File, s: MeasurementSession) {
+        f.bufferedWriter().use { w ->
+            w.write("timestampNs,edge,channel,summary,payload\n")
+            synchronized(s.roiAuditEvents) {
+                for (e in s.roiAuditEvents) {
+                    w.write(
+                        "${e.timestampNs},${e.edge.name},${e.channel.name}," +
+                            "\"${e.summary.replace("\"", "'")}\",\"${e.payload.replace("\"", "'")}\"\n"
+                    )
+                }
+            }
+        }
+    }
+
     private fun writeReport(f: File, s: MeasurementSession) {
         f.writeText(buildString {
             appendLine("== REPORTE FORENSE DE MEDICIÓN PPG ==")
@@ -166,6 +196,7 @@ class SessionExporter(private val context: Context) {
             appendLine("jitter (ms): ${"%.2f".format(s.fpsJitterMs)}")
             appendLine("frames total/aceptados/rechazados: ${s.framesTotal}/${s.framesAccepted}/${s.framesRejected}")
             appendLine("latidos registrados: ${s.beats.size}")
+            appendLine("eventos ROI audit: ${s.roiAuditEvents.size}")
             appendLine("BPM medio: ${s.finalBpmMean}")
             appendLine("SDNN (ms): ${s.finalBpmSdnn}")
             appendLine("SpO₂ medio: ${s.finalSpo2Mean}")

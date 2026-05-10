@@ -41,6 +41,8 @@ data class MeasurementSession(
     val samples: MutableList<PpgSample> = mutableListOf(),
     val beats: MutableList<ConfirmedBeat> = mutableListOf(),
     val events: MutableList<MeasurementEvent> = mutableListOf(),
+    /** Línea temporal ROI / contacto / clipping (TRIGGER-CLEAR) para auditoría en vivo. */
+    val roiAuditEvents: MutableList<RoiAuditEvent> = mutableListOf(),
     var finalBpmMean: Double? = null,
     var finalBpmSdnn: Double? = null,
     var finalSpo2Mean: Double? = null,

@@ -20,7 +20,7 @@ import kotlin.math.abs
 /** Cadena única: muestra → DSP → SQI duro → evidencia fisiológica → picos → vitales sólo con PPG_VALID. */
 class PpgPipeline(
     sampleRateHz: Double,
-    @Suppress("unused") private val auditTrail: AuditTrail? = null
+    private val auditTrail: AuditTrail? = null
 ) {
     data class AcquisitionMetrics(
         val frameDrops: Long,
@@ -43,6 +43,7 @@ class PpgPipeline(
     private val rhythm = RhythmAnalyzer()
     private val peak = PpgPeakDetector(sr, rhythm)
     private val sqi = PpgSignalQuality()
+    private val roiAudit = RoiAuditDetector(auditTrail)
 
     val spo2Estimator: Spo2Estimator = Spo2Estimator(sr, windowSeconds = 10.0)
 
@@ -55,6 +56,7 @@ class PpgPipeline(
         rhythm.reset()
         peak.reset()
         spo2Estimator.reset()
+        roiAudit.reset()
         pipelineStartMonoNs = null
         maskGoodSinceMonoNs = null
         lastContactScore = 0.0
@@ -76,6 +78,7 @@ class PpgPipeline(
             rhythm.reset()
             peak.reset()
             spo2Estimator.reset()
+            roiAudit.reset()
             maskGoodSinceMonoNs = null
             pipelineStartMonoNs = mono
         }
@@ -139,6 +142,14 @@ class PpgPipeline(
             roiFingerProfileScore = ppg.roiStats.fingerProfileScore(),
             greenAcDcBandEstimate = ppg.roiStats.greenAcDc,
             contactScore = ppg.contactScore
+        )
+
+        roiAudit.onFrame(
+            ppg = ppg,
+            fusedMotion01 = fusedMotion,
+            validity = physiology,
+            measuredFpsHz = acq.measuredFpsHz,
+            targetFps = acq.targetFpsHint
         )
 
         val beat = peak.onSample(
@@ -322,6 +333,8 @@ class PpgPipeline(
                 maskCoverage = ppg.maskCoverage,
                 contactScore = ppg.contactScore,
                 motionScore = fusedMotion.coerceAtMost(1.0),
+                clippingHighRatio = ppg.clippingHighRatio,
+                clippingLowRatio = ppg.clippingLowRatio,
                 rrMs = if (allowsDerivedVitals) rhythmPost.meanMs else null,
                 rrSdnnMs = if (allowsDerivedVitals) rhythmPost.sdnn else null,
                 rmssdMs = if (allowsDerivedVitals) rhythmPost.rmssd else null,

@@ -12,4 +12,11 @@ class AuditTrail(private val session: MeasurementSession) {
             session.events += MeasurementEvent(timestampNs, kind, details)
         }
     }
+
+    /** Registro ROI / contacto / clipping (TRIGGER-CLEAR); paralelo a [MeasurementEvent]. */
+    fun logRoi(event: RoiAuditEvent) {
+        synchronized(session.roiAuditEvents) {
+            session.roiAuditEvents += event
+        }
+    }
 }

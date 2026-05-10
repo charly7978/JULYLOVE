@@ -27,6 +27,9 @@ data class VitalReading(
     /** Contacto óptico compuesto [0..1]. */
     val contactScore: Double = 0.0,
     val motionScore: Double = 0.0,
+    /** Ratios de clipping del último frame ROI (0–1), para barras de adquisición. */
+    val clippingHighRatio: Double = 0.0,
+    val clippingLowRatio: Double = 0.0,
     val rrMs: Double? = null,
     val rrSdnnMs: Double? = null,
     val rmssdMs: Double? = null,

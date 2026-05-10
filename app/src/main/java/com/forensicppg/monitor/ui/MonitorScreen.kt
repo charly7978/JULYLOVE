@@ -50,6 +50,7 @@ fun MonitorScreen(
     val calibration by viewModel.calibrationProfile.collectAsState()
     val audioOn by viewModel.feedbackAudioOn.collectAsState()
     val vibOn by viewModel.feedbackVibrationOn.collectAsState()
+    val roiAuditEntries by viewModel.roiAuditTail.collectAsState()
 
     var showDiagnostics by remember { mutableStateOf(false) }
     var showFingerPlacementGuide by remember { mutableStateOf(true) }
@@ -124,6 +125,11 @@ fun MonitorScreen(
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 VitalsColumn(reading, fps, calibration != null)
+                RoiAuditTimeline(
+                    entries = roiAuditEntries,
+                    maxVisible = 16,
+                    modifier = Modifier.fillMaxWidth()
+                )
                 ArrhythmiaEventOverlay(reading, modifier = Modifier.fillMaxWidth())
                 DiagnosticsToggleRow(
                     showDiagnostics = showDiagnostics,
